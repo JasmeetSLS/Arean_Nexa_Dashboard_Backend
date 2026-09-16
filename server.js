@@ -34,6 +34,7 @@ app.get('/api/grid', async (_req, res) => {
       SELECT
         ud.mspin,
         ud.name,
+        ud.role,
         td.id         AS trainer_id,
         td.name       AS trainer_name,
         td.photo_url  AS trainer_photo
@@ -65,6 +66,7 @@ app.get('/api/grid', async (_req, res) => {
         .map((r) => ({
           mspin: r.mspin,
           name: r.name,
+          role: r.role,
         }));
 
       return {
