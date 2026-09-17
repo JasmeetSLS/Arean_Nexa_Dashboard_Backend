@@ -3,6 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2/promise');
+const ExcelJS = require('exceljs');
 
 const app = express();
 app.use(cors());
@@ -494,6 +495,162 @@ app.get('/api/filters', async (_req, res) => {
     });
   } catch (err) {
     console.error('[/api/filters] error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// =====================================================================
+// GET /api/export/users  →  Download all users as .xlsx
+// Optional query params:
+//   ?region=West  &zone=North  &role=Sales  &status=Pass
+// =====================================================================
+app.get('/api/export/users', async (req, res) => {
+  try {
+    const { region, zone, role, status } = req.query;
+
+    // ---- Build dynamic WHERE ----
+    const where = [];
+    const params = [];
+    if (region) { where.push('ud.region = ?'); params.push(region); }
+    if (zone)   { where.push('ud.zone = ?');   params.push(zone); }
+    if (role)   { where.push('ud.role = ?');   params.push(role); }
+    if (status) { where.push('ur.status = ?'); params.push(status); }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    // ---- Fetch joined data ----
+    const [rows] = await pool.query(
+      `
+      SELECT
+        ud.mspin,
+        ud.name,
+        ud.role,
+        ud.agency,
+        ud.region,
+        ud.zone,
+        ud.city,
+        ud.dealer_name,
+        ud.dealer_code,
+        ur.trainer,
+        ur.percentage,
+        ur.status        AS pass_fail,
+        ur.rounds_status,
+        ur.total_time,
+        ur.updated_at
+      FROM user_details ud
+      LEFT JOIN user_result ur ON ur.mspin = ud.mspin
+      ${whereSql}
+      ORDER BY ud.region, ud.zone, ud.name
+      `,
+      params
+    );
+
+    // ---- Build workbook ----
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'Skill Contest Portal';
+    wb.created = new Date();
+
+    const ws = wb.addWorksheet('Users', {
+      views: [{ state: 'frozen', ySplit: 1 }],
+    });
+
+    // Column definitions
+    ws.columns = [
+      { header: 'MSPIN',         key: 'mspin',         width: 16 },
+      { header: 'Name',          key: 'name',          width: 24 },
+      { header: 'Role',          key: 'role',          width: 16 },
+      { header: 'Agency',        key: 'agency',        width: 20 },
+      { header: 'Region',        key: 'region',        width: 14 },
+      { header: 'Zone',          key: 'zone',          width: 12 },
+      { header: 'City',          key: 'city',          width: 16 },
+      { header: 'Dealer Name',   key: 'dealer_name',   width: 26 },
+      { header: 'Dealer Code',   key: 'dealer_code',   width: 14 },
+      { header: 'Trainer',       key: 'trainer',       width: 22 },
+      { header: 'Percentage',    key: 'percentage',    width: 12 },
+      { header: 'Status',        key: 'pass_fail',     width: 10 },
+      { header: 'Rounds Status', key: 'rounds_status', width: 14 },
+      { header: 'Total Time',    key: 'total_time',    width: 12 },
+      { header: 'Updated At',    key: 'updated_at',    width: 20 },
+    ];
+
+    // Style header row
+    const header = ws.getRow(1);
+    header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    header.alignment = { vertical: 'middle', horizontal: 'center' };
+    header.height = 22;
+    header.eachCell((cell) => {
+      cell.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FF4C1D95' }, // purple-700
+      };
+      cell.border = {
+        top:    { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        left:   { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        right:  { style: 'thin', color: { argb: 'FFE5E7EB' } },
+      };
+    });
+
+    // Add data rows
+    rows.forEach((r) => {
+      const row = ws.addRow({
+        mspin:         r.mspin,
+        name:          r.name,
+        role:          r.role,
+        agency:        r.agency,
+        region:        r.region,
+        zone:          r.zone,
+        city:          r.city,
+        dealer_name:   r.dealer_name,
+        dealer_code:   r.dealer_code,
+        trainer:       r.trainer        || '—',
+        percentage:    r.percentage != null ? Number(r.percentage) : null,
+        pass_fail:     r.pass_fail      || '—',
+        rounds_status: r.rounds_status  || '—',
+        total_time:    r.total_time     || '—',
+        updated_at:    r.updated_at ? new Date(r.updated_at) : null,
+      });
+
+      // Color-code Pass / Fail
+      const statusCell = row.getCell('pass_fail');
+      if (r.pass_fail === 'Pass') {
+        statusCell.font = { bold: true, color: { argb: 'FF047857' } }; // emerald-700
+      } else if (r.pass_fail === 'Fail') {
+        statusCell.font = { bold: true, color: { argb: 'FFB91C1C' } }; // red-700
+      }
+
+      // Percentage formatting
+      const pctCell = row.getCell('percentage');
+      if (r.percentage != null) {
+        pctCell.numFmt = '0.00"%"';
+        pctCell.alignment = { horizontal: 'right' };
+      }
+
+      // Date formatting
+      const dateCell = row.getCell('updated_at');
+      if (dateCell.value) {
+        dateCell.numFmt = 'yyyy-mm-dd hh:mm';
+      }
+    });
+
+    // ---- Filename ----
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const filename = `users_export_${stamp}.xlsx`;
+
+    // ---- Send ----
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${filename}"`
+    );
+
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error('[/api/export/users] error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
