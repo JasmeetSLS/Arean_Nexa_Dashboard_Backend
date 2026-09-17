@@ -3,6 +3,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2/promise');
+const http = require('http');
+const { Server } = require('socket.io');
 const ExcelJS = require('exceljs');
 
 const app = express();
@@ -36,7 +38,7 @@ const secondsToHms = (secs) => {
 };
 
 // =====================================================================
-// GET /api/grid (unchanged)
+// GET /api/grid
 // =====================================================================
 app.get('/api/grid', async (_req, res) => {
   try {
@@ -111,7 +113,6 @@ app.get('/api/grid', async (_req, res) => {
         });
 
       const totalAssigned = assigned.length;
-
       const passCount = assigned.filter((p) => p.status === 'Pass').length;
       const passPercentage =
         totalAssigned > 0
@@ -152,108 +153,87 @@ app.get('/api/grid', async (_req, res) => {
   }
 });
 
-
 // =====================================================================
 // GET /api/dashboard
-//   todayLive      → stats restricted to TODAY only
-//   regionSummary  → lifetime, grouped by region + zone
-//   trainerSummary → lifetime, grouped by trainer
-//   contestTotals  → lifetime, global
 // =====================================================================
 app.get('/api/dashboard', async (_req, res) => {
   try {
-    // ---- 1. All users ----
     const [users] = await pool.query(`
       SELECT mspin, name, region, zone
       FROM user_details
     `);
 
-    // ---- 2. All rounds (with start_time for today filter) ----
     const [rounds] = await pool.query(`
       SELECT mspin, trainer_name, round_name, score, status, start_time, end_time
       FROM participant_rounds
     `);
 
-    // ---- 3. user_result ----
     const [results] = await pool.query(`
       SELECT mspin, percentage, total_time, status, rounds_status
       FROM user_result
     `);
 
-    // ---- 4. Trainers ----
     const [trainerRows] = await pool.query(`
       SELECT id, name, photo_url
       FROM trainer_details
       ORDER BY id
     `);
 
-    // ---- 5. Indexes ----
     const resultByUser = {};
     for (const r of results) resultByUser[r.mspin] = r;
 
     const userByMspin = {};
     for (const u of users) userByMspin[u.mspin] = u;
 
-    // =====================================================================
-    // todayLive — stats for TODAY only
-    // =====================================================================
+    // ---- todayLive ----
     const today = new Date();
     const yyyy = today.getFullYear();
     const mm   = String(today.getMonth() + 1).padStart(2, '0');
     const dd   = String(today.getDate()).padStart(2, '0');
     const todayDate = `${yyyy}-${mm}-${dd}`;
 
-    // Rounds whose start_time date == today
     const todayRounds = rounds.filter(
       (r) => r.start_time && r.start_time.slice(0, 10) === todayDate
     );
 
-    // Distinct mspins scheduled today
     const todayMspins = new Set(todayRounds.map((r) => r.mspin));
+    const todayResults = results.filter((r) => todayMspins.has(r.mspin));
 
-// Today's results = user_result for those mspins
-const todayResults = results.filter((r) => todayMspins.has(r.mspin));
+    const tPass = todayResults.filter((r) => r.status === 'Pass').length;
+    const tFail = todayResults.filter((r) => r.status === 'Fail').length;
 
-const tPass = todayResults.filter((r) => r.status === 'Pass').length;
-const tFail = todayResults.filter((r) => r.status === 'Fail').length;
+    const tPassRate = (tPass + tFail) > 0
+      ? Number(((tPass / (tPass + tFail)) * 100).toFixed(2))
+      : 0;
 
-const tPassRate = (tPass + tFail) > 0
-  ? Number(((tPass / (tPass + tFail)) * 100).toFixed(2))
-  : 0;
+    const tSecs = todayResults.reduce(
+      (sum, r) => sum + hmsToSeconds(r.total_time), 0
+    );
+    const tAvgTime = todayResults.length > 0
+      ? secondsToHms(Math.round(tSecs / todayResults.length))
+      : '00:00:00';
 
-const tSecs = todayResults.reduce(
-  (sum, r) => sum + hmsToSeconds(r.total_time), 0
-);
-const tAvgTime = todayResults.length > 0
-  ? secondsToHms(Math.round(tSecs / todayResults.length))
-  : '00:00:00';
+    const todayCompleted = todayResults.filter(
+      (r) => r.rounds_status === 'Completed'
+    ).length;
 
-// ---- Today's completed vs in-progress ----
-// "Completed" = user_result.rounds_status === 'Completed' for those mspins
-const todayCompleted = todayResults.filter(
-  (r) => r.rounds_status === 'Completed'
-).length;
+    const todayInProgress = todayMspins.size - todayCompleted;
 
-// "In Progress" = users who have rounds today but haven't finished all 5
-const todayInProgress = todayMspins.size - todayCompleted;
+    const activeTrainers = new Set(
+      rounds.map((r) => r.trainer_name).filter(Boolean)
+    );
 
-   const activeTrainers = new Set(
-  rounds.map((r) => r.trainer_name).filter(Boolean)
-);
+    const todayLive = {
+      date:           todayDate,
+      scheduled:      todayMspins.size,
+      completed:      todayCompleted,
+      inProgress:     todayInProgress,
+      passRate:       tPassRate,
+      avgTime:        tAvgTime,
+      activeTrainers: activeTrainers.size,
+    };
 
-const todayLive = {
-  date:           todayDate,
-  scheduled:      todayMspins.size,
-  completed:      todayCompleted,
-  inProgress:     todayInProgress,
-  passRate:       tPassRate,
-  avgTime:        tAvgTime,
-  activeTrainers: activeTrainers.size,
-};
-
-    // =====================================================================
-    // regionSummary — lifetime, grouped by region + zone
-    // =====================================================================
+    // ---- regionSummary ----
     const regionBuckets = {};
     for (const r of results) {
       const u = userByMspin[r.mspin];
@@ -261,17 +241,12 @@ const todayLive = {
       const key = `${u.region || '—'}|${u.zone || '—'}`;
       if (!regionBuckets[key]) {
         regionBuckets[key] = {
-          region:   u.region || '—',
-          zone:     u.zone   || '—',
-          total:    0,
-          completed: 0,
-          pass:     0,
-          fail:     0,
-          totalSecs: 0,
+          region: u.region || '—', zone: u.zone || '—',
+          total: 0, completed: 0, pass: 0, fail: 0, totalSecs: 0,
         };
       }
       const b = regionBuckets[key];
-      b.total     += 1;
+      b.total += 1;
       if (r.rounds_status === 'Completed') b.completed += 1;
       if (r.status === 'Pass') b.pass += 1;
       if (r.status === 'Fail') b.fail += 1;
@@ -295,67 +270,58 @@ const todayLive = {
         a.region.localeCompare(b.region) || a.zone.localeCompare(b.zone)
       );
 
-    // =====================================================================
-    // trainerSummary — lifetime
-    // =====================================================================
-const trainerSummary = trainerRows.map((t) => {
-  const assignedUsers = users.filter((u) => {
-    const userRounds = rounds.filter((r) => r.mspin === u.mspin);
-    if (userRounds.length === 0) return false;
-    const lastRound = userRounds[userRounds.length - 1];
-    return lastRound.trainer_name === t.name;
-  });
+    // ---- trainerSummary ----
+    const trainerSummary = trainerRows.map((t) => {
+      const assignedUsers = users.filter((u) => {
+        const userRounds = rounds.filter((r) => r.mspin === u.mspin);
+        if (userRounds.length === 0) return false;
+        return userRounds[userRounds.length - 1].trainer_name === t.name;
+      });
 
-  const assigned = assignedUsers.length;
-  const pass = assignedUsers.filter((u) => {
-    const ur = resultByUser[u.mspin];
-    return ur && ur.status === 'Pass';
-  }).length;
-  const fail = assignedUsers.filter((u) => {
-    const ur = resultByUser[u.mspin];
-    return ur && ur.status === 'Fail';
-  }).length;
+      const assigned = assignedUsers.length;
+      const pass = assignedUsers.filter((u) => {
+        const ur = resultByUser[u.mspin];
+        return ur && ur.status === 'Pass';
+      }).length;
+      const fail = assignedUsers.filter((u) => {
+        const ur = resultByUser[u.mspin];
+        return ur && ur.status === 'Fail';
+      }).length;
 
-  const secs = assignedUsers.reduce((sum, u) => {
-    const ur = resultByUser[u.mspin];
-    return sum + (ur ? hmsToSeconds(ur.total_time) : 0);
-  }, 0);
+      const secs = assignedUsers.reduce((sum, u) => {
+        const ur = resultByUser[u.mspin];
+        return sum + (ur ? hmsToSeconds(ur.total_time) : 0);
+      }, 0);
 
-  // ---- roundJourney: for THIS trainer, how many completed rounds per round name ----
-  // e.g. { round1: "5", round2: "3" } means this trainer has taught Round 1 five times
-  // and Round 2 three times (counting completed rounds only).
-  const roundJourney = {};
-  rounds.forEach((r) => {
-    if (r.trainer_name !== t.name) return;
-    if (r.status !== 'completed') return;   // only count finished rounds
-    const key = r.round_name.toLowerCase().replace(/\s+/g, ''); // "Round 1" → "round1"
-    roundJourney[key] = (roundJourney[key] || 0) + 1;
-  });
+      const roundJourney = {};
+      rounds.forEach((r) => {
+        if (r.trainer_name !== t.name) return;
+        if (r.status !== 'completed') return;
+        const key = r.round_name.toLowerCase().replace(/\s+/g, '');
+        roundJourney[key] = (roundJourney[key] || 0) + 1;
+      });
 
-  // Convert counts to strings (matches the sample response)
-  const roundJourneyStr = {};
-  Object.keys(roundJourney).forEach((k) => {
-    roundJourneyStr[k] = String(roundJourney[k]);
-  });
+      const roundJourneyStr = {};
+      Object.keys(roundJourney).forEach((k) => {
+        roundJourneyStr[k] = String(roundJourney[k]);
+      });
 
-  return {
-    id:       t.id,
-    name:     t.name,
-    photoUrl: t.photo_url,
-    assigned,
-    passRate: (pass + fail) > 0
-      ? Number(((pass / (pass + fail)) * 100).toFixed(2))
-      : 0,
-    avgTime:  assigned > 0
-      ? secondsToHms(Math.round(secs / assigned))
-      : '00:00:00',
-    roundJourney: roundJourneyStr,
-  };
-});
+      return {
+        id:       t.id,
+        name:     t.name,
+        photoUrl: t.photo_url,
+        assigned,
+        passRate: (pass + fail) > 0
+          ? Number(((pass / (pass + fail)) * 100).toFixed(2))
+          : 0,
+        avgTime:  assigned > 0
+          ? secondsToHms(Math.round(secs / assigned))
+          : '00:00:00',
+        roundJourney: roundJourneyStr,
+      };
+    });
 
-    // =====================================================================
-    // contestTotals — lifetime
-    // =====================================================================
+    // ---- contestTotals ----
     const totalScheduled = users.length;
     const totalAttempted = rounds.filter((r) => r.status === 'completed').length;
     const overallPass = results.filter((r) => r.status === 'Pass').length;
@@ -368,27 +334,23 @@ const trainerSummary = trainerRows.map((t) => {
       ? secondsToHms(Math.round(allSecs / results.length))
       : '00:00:00';
 
-  // ---- Lifetime Completed vs In Progress (from user_result) ----
-const totalCompleted = results.filter(
-  (r) => r.rounds_status === 'Completed'
-).length;
+    const totalCompleted = results.filter(
+      (r) => r.rounds_status === 'Completed'
+    ).length;
 
-const totalInProgress = results.filter(
-  (r) => r.rounds_status !== 'Completed'
-).length;
+    const totalInProgress = results.filter(
+      (r) => r.rounds_status !== 'Completed'
+    ).length;
 
-const contestTotals = {
-  totalScheduled,
-  totalAttempted,
-  completed:   totalCompleted,
-  inProgress:  totalInProgress,
-  passRate:    overallPassRate,
-  avgTime:     overallAvg,
-};
+    const contestTotals = {
+      totalScheduled,
+      totalAttempted,
+      completed:   totalCompleted,
+      inProgress:  totalInProgress,
+      passRate:    overallPassRate,
+      avgTime:     overallAvg,
+    };
 
-    // =====================================================================
-    // Response
-    // =====================================================================
     res.json({
       success: true,
       generatedAt: new Date().toISOString(),
@@ -405,11 +367,9 @@ const contestTotals = {
 
 // =====================================================================
 // GET /api/filters
-// Returns all distinct filter values for dashboard dropdowns.
 // =====================================================================
 app.get('/api/filters', async (_req, res) => {
   try {
-    // 1. Distinct dates from participant_rounds
     const [dateRows] = await pool.query(`
       SELECT DISTINCT DATE(start_time) AS d
       FROM participant_rounds
@@ -417,7 +377,6 @@ app.get('/api/filters', async (_req, res) => {
       ORDER BY d DESC
     `);
 
-    // 2. Distinct zones + regions from user_details
     const [zoneRows] = await pool.query(`
       SELECT DISTINCT zone FROM user_details
       WHERE zone IS NOT NULL AND zone <> ''
@@ -430,28 +389,24 @@ app.get('/api/filters', async (_req, res) => {
       ORDER BY region
     `);
 
-    // 3. Trainers
     const [trainerRows] = await pool.query(`
       SELECT id, name, photo_url
       FROM trainer_details
       ORDER BY name
     `);
 
-    // 4. Roles
     const [roleRows] = await pool.query(`
       SELECT DISTINCT role FROM user_details
       WHERE role IS NOT NULL AND role <> ''
       ORDER BY role
     `);
 
-    // 5. Agencies
     const [agencyRows] = await pool.query(`
       SELECT DISTINCT agency FROM user_details
       WHERE agency IS NOT NULL AND agency <> ''
       ORDER BY agency
     `);
 
-    // 6. Dealer names & codes
     const [dealerNameRows] = await pool.query(`
       SELECT DISTINCT dealer_name FROM user_details
       WHERE dealer_name IS NOT NULL AND dealer_name <> ''
@@ -464,17 +419,13 @@ app.get('/api/filters', async (_req, res) => {
       ORDER BY dealer_code
     `);
 
-    // ---- Shape response ----
-    const dates       = dateRows.map(r => {
-      // MySQL DATE() with dateStrings:true returns "YYYY-MM-DD"
-      return typeof r.d === 'string' ? r.d : new Date(r.d).toISOString().slice(0, 10);
-    });
+    const dates = dateRows.map(r =>
+      typeof r.d === 'string' ? r.d : new Date(r.d).toISOString().slice(0, 10)
+    );
     const zones       = zoneRows.map(r => r.zone);
     const regions     = regionRows.map(r => r.region);
     const trainers    = trainerRows.map(t => ({
-      id:       t.id,
-      name:     t.name,
-      photoUrl: t.photo_url,
+      id: t.id, name: t.name, photoUrl: t.photo_url,
     }));
     const roles       = roleRows.map(r => r.role);
     const agencies    = agencyRows.map(r => r.agency);
@@ -484,14 +435,8 @@ app.get('/api/filters', async (_req, res) => {
     res.json({
       success: true,
       generatedAt: new Date().toISOString(),
-      dates,
-      zones,
-      regions,
-      trainers,
-      roles,
-      agencies,
-      dealerNames,
-      dealerCodes,
+      dates, zones, regions, trainers, roles, agencies,
+      dealerNames, dealerCodes,
     });
   } catch (err) {
     console.error('[/api/filters] error:', err);
@@ -500,42 +445,34 @@ app.get('/api/filters', async (_req, res) => {
 });
 
 // =====================================================================
-// GET /api/export/users  →  Download all users as .xlsx
-// Optional query params:
-//   ?region=West  &zone=North  &role=Sales  &status=Pass
+// GET /api/export/users  →  Excel export
 // =====================================================================
 app.get('/api/export/users', async (req, res) => {
   try {
-    const { region, zone, role, status } = req.query;
+    const {
+      region, zone, role, status,
+      agency, dealerName, dealerCode, trainer,
+    } = req.query;
 
-    // ---- Build dynamic WHERE ----
     const where = [];
     const params = [];
-    if (region) { where.push('ud.region = ?'); params.push(region); }
-    if (zone)   { where.push('ud.zone = ?');   params.push(zone); }
-    if (role)   { where.push('ud.role = ?');   params.push(role); }
-    if (status) { where.push('ur.status = ?'); params.push(status); }
+    if (region)     { where.push('ud.region = ?');      params.push(region); }
+    if (zone)       { where.push('ud.zone = ?');        params.push(zone); }
+    if (role)       { where.push('ud.role = ?');        params.push(role); }
+    if (status)     { where.push('ur.status = ?');      params.push(status); }
+    if (agency)     { where.push('ud.agency = ?');      params.push(agency); }
+    if (dealerName) { where.push('ud.dealer_name = ?'); params.push(dealerName); }
+    if (dealerCode) { where.push('ud.dealer_code = ?'); params.push(dealerCode); }
+    if (trainer)    { where.push('ur.trainer = ?');     params.push(trainer); }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-    // ---- Fetch joined data ----
     const [rows] = await pool.query(
       `
       SELECT
-        ud.mspin,
-        ud.name,
-        ud.role,
-        ud.agency,
-        ud.region,
-        ud.zone,
-        ud.city,
-        ud.dealer_name,
-        ud.dealer_code,
-        ur.trainer,
-        ur.percentage,
-        ur.status        AS pass_fail,
-        ur.rounds_status,
-        ur.total_time,
-        ur.updated_at
+        ud.mspin, ud.name, ud.role, ud.agency, ud.region, ud.zone,
+        ud.city, ud.dealer_name, ud.dealer_code,
+        ur.trainer, ur.percentage, ur.status AS pass_fail,
+        ur.rounds_status, ur.total_time, ur.updated_at
       FROM user_details ud
       LEFT JOIN user_result ur ON ur.mspin = ud.mspin
       ${whereSql}
@@ -544,7 +481,6 @@ app.get('/api/export/users', async (req, res) => {
       params
     );
 
-    // ---- Build workbook ----
     const wb = new ExcelJS.Workbook();
     wb.creator = 'Skill Contest Portal';
     wb.created = new Date();
@@ -553,7 +489,6 @@ app.get('/api/export/users', async (req, res) => {
       views: [{ state: 'frozen', ySplit: 1 }],
     });
 
-    // Column definitions
     ws.columns = [
       { header: 'MSPIN',         key: 'mspin',         width: 16 },
       { header: 'Name',          key: 'name',          width: 24 },
@@ -572,17 +507,12 @@ app.get('/api/export/users', async (req, res) => {
       { header: 'Updated At',    key: 'updated_at',    width: 20 },
     ];
 
-    // Style header row
     const header = ws.getRow(1);
     header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
     header.alignment = { vertical: 'middle', horizontal: 'center' };
     header.height = 22;
     header.eachCell((cell) => {
-      cell.fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: 'FF4C1D95' }, // purple-700
-      };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4C1D95' } };
       cell.border = {
         top:    { style: 'thin', color: { argb: 'FFE5E7EB' } },
         left:   { style: 'thin', color: { argb: 'FFE5E7EB' } },
@@ -591,7 +521,6 @@ app.get('/api/export/users', async (req, res) => {
       };
     });
 
-    // Add data rows
     rows.forEach((r) => {
       const row = ws.addRow({
         mspin:         r.mspin,
@@ -611,41 +540,30 @@ app.get('/api/export/users', async (req, res) => {
         updated_at:    r.updated_at ? new Date(r.updated_at) : null,
       });
 
-      // Color-code Pass / Fail
       const statusCell = row.getCell('pass_fail');
-      if (r.pass_fail === 'Pass') {
-        statusCell.font = { bold: true, color: { argb: 'FF047857' } }; // emerald-700
-      } else if (r.pass_fail === 'Fail') {
-        statusCell.font = { bold: true, color: { argb: 'FFB91C1C' } }; // red-700
-      }
+      if (r.pass_fail === 'Pass')
+        statusCell.font = { bold: true, color: { argb: 'FF047857' } };
+      else if (r.pass_fail === 'Fail')
+        statusCell.font = { bold: true, color: { argb: 'FFB91C1C' } };
 
-      // Percentage formatting
       const pctCell = row.getCell('percentage');
       if (r.percentage != null) {
         pctCell.numFmt = '0.00"%"';
         pctCell.alignment = { horizontal: 'right' };
       }
 
-      // Date formatting
       const dateCell = row.getCell('updated_at');
-      if (dateCell.value) {
-        dateCell.numFmt = 'yyyy-mm-dd hh:mm';
-      }
+      if (dateCell.value) dateCell.numFmt = 'yyyy-mm-dd hh:mm';
     });
 
-    // ---- Filename ----
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
     const filename = `users_export_${stamp}.xlsx`;
 
-    // ---- Send ----
     res.setHeader(
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     );
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${filename}"`
-    );
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
     await wb.xlsx.write(res);
     res.end();
@@ -655,13 +573,183 @@ app.get('/api/export/users', async (req, res) => {
   }
 });
 
+// =====================================================================
+// GET /api/chat/:trainerId/messages  →  Chat history
+// =====================================================================
+app.get('/api/chat/:trainerId/messages', async (req, res) => {
+  try {
+    const { trainerId } = req.params;
+    const limit = Math.min(Number(req.query.limit) || 200, 500);
+
+    const [rows] = await pool.query(
+      `SELECT id, trainer_id, sender_type, sender_name, message, is_read, created_at
+         FROM chat_messages
+        WHERE trainer_id = ?
+        ORDER BY id DESC
+        LIMIT ?`,
+      [trainerId, limit]
+    );
+
+    res.json({
+      success: true,
+      messages: rows.reverse().map((r) => ({
+        id:         r.id,
+        trainerId:  r.trainer_id,
+        senderType: r.sender_type,
+        senderName: r.sender_name,
+        message:    r.message,
+        isRead:     !!r.is_read,
+        createdAt:  r.created_at,
+      })),
+    });
+  } catch (err) {
+    console.error('[/api/chat/:trainerId/messages]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// =====================================================================
+// GET /api/chat/summary
+// =====================================================================
+app.get('/api/chat/summary', async (_req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT
+        t.id        AS trainer_id,
+        t.name      AS trainer_name,
+        t.photo_url AS trainer_photo,
+        (SELECT message    FROM chat_messages c WHERE c.trainer_id = t.id ORDER BY id DESC LIMIT 1) AS last_message,
+        (SELECT created_at FROM chat_messages c WHERE c.trainer_id = t.id ORDER BY id DESC LIMIT 1) AS last_at,
+        (SELECT COUNT(*)   FROM chat_messages c
+          WHERE c.trainer_id = t.id AND c.sender_type = 'trainer' AND c.is_read = 0) AS unread
+      FROM trainer_details t
+      ORDER BY (last_at IS NULL), last_at DESC, t.name
+    `);
+
+    res.json({
+      success: true,
+      summary: rows.map((r) => ({
+        trainerId:    r.trainer_id,
+        trainerName:  r.trainer_name,
+        trainerPhoto: r.trainer_photo,
+        lastMessage:  r.last_message,
+        lastAt:       r.last_at,
+        unread:       Number(r.unread) || 0,
+      })),
+    });
+  } catch (err) {
+    console.error('[/api/chat/summary]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ---- Health check ----
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// ---- Start ----
+// =====================================================================
+// HTTP + Socket.IO
+// =====================================================================
+const server = http.createServer(app);
+
+const io = new Server(server, {
+  cors: { origin: '*', methods: ['GET', 'POST'] },
+});
+
+// Track online trainers: { trainerId: Set<socketId> }
+const onlineTrainers = new Map();
+
+io.on('connection', (socket) => {
+  console.log('[socket] connected', socket.id);
+
+  socket.on('register', ({ role, trainerId, name }) => {
+    socket.role = role;
+    socket.trainerId = trainerId || null;
+    socket.name = name || 'Unknown';
+
+    if (role === 'trainer' && trainerId) {
+      if (!onlineTrainers.has(trainerId)) onlineTrainers.set(trainerId, new Set());
+      onlineTrainers.get(trainerId).add(socket.id);
+      io.emit('trainer:online', { trainerId, online: true });
+    }
+
+    if (role === 'panel') {
+      socket.join('panel');
+      socket.emit('trainer:onlineList', Array.from(onlineTrainers.keys()));
+    }
+  });
+
+  socket.on('message:send', async ({ trainerId, senderType, senderName, message }, ack) => {
+    try {
+      if (!trainerId || !message?.trim()) {
+        return ack?.({ ok: false, error: 'Missing trainerId or message' });
+      }
+
+      const [result] = await pool.query(
+        `INSERT INTO chat_messages (trainer_id, sender_type, sender_name, message)
+         VALUES (?, ?, ?, ?)`,
+        [trainerId, senderType, senderName, message.trim()]
+      );
+
+      const payload = {
+        id: result.insertId,
+        trainerId,
+        senderType,
+        senderName,
+        message: message.trim(),
+        isRead: false,
+        createdAt: new Date().toISOString(),
+      };
+
+      io.to('panel').emit('message:new', payload);
+      const trainerSockets = onlineTrainers.get(Number(trainerId));
+      if (trainerSockets) {
+        trainerSockets.forEach((sid) => io.to(sid).emit('message:new', payload));
+      }
+
+      ack?.({ ok: true, payload });
+    } catch (err) {
+      console.error('[socket message:send]', err);
+      ack?.({ ok: false, error: err.message });
+    }
+  });
+
+  socket.on('message:read', async ({ trainerId, readerType }) => {
+    try {
+      const fromType = readerType === 'panel' ? 'trainer' : 'panel';
+      await pool.query(
+        `UPDATE chat_messages
+         SET is_read = 1
+         WHERE trainer_id = ? AND sender_type = ? AND is_read = 0`,
+        [trainerId, fromType]
+      );
+
+      io.to('panel').emit('message:read', { trainerId, readerType });
+      const trainerSockets = onlineTrainers.get(Number(trainerId));
+      if (trainerSockets) {
+        trainerSockets.forEach((sid) =>
+          io.to(sid).emit('message:read', { trainerId, readerType })
+        );
+      }
+    } catch (err) {
+      console.error('[socket message:read]', err);
+    }
+  });
+
+  socket.on('disconnect', () => {
+    if (socket.role === 'trainer' && socket.trainerId) {
+      const set = onlineTrainers.get(socket.trainerId);
+      if (set) {
+        set.delete(socket.id);
+        if (set.size === 0) {
+          onlineTrainers.delete(socket.trainerId);
+          io.emit('trainer:online', { trainerId: socket.trainerId, online: false });
+        }
+      }
+    }
+  });
+});
+
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`✅ API running → http://localhost:${PORT}`);
-  console.log(`   GET /api/grid`);
-  console.log(`   GET /api/dashboard`);
+server.listen(PORT, () => {
+  console.log(`✅ API + Socket.IO running → http://localhost:${PORT}`);
 });

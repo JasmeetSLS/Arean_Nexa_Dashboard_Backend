@@ -17,6 +17,7 @@
     "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "mysql2": "^3.24.4",
-    "nodemon": "^3.1.14"
+    "nodemon": "^3.1.14",
+    "socket.io": "^4.8.3"
   }
 }
