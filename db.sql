@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS `user_details` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_user_mspin` (`mspin`),
   KEY `idx_round_start_time` (`round_start_time`)
-) ENGINE=InnoDB AUTO_INCREMENT=91 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=181 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- Data exporting was unselected.
 

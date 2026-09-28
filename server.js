@@ -44,34 +44,34 @@ app.get('/api/grid', async (_req, res) => {
   try {
     const [users] = await pool.query(`
       SELECT
-        ud.mspin,
+        ud.mpin,
         ud.name,
         ud.role,
         td.id         AS trainer_id,
         td.name       AS trainer_name,
         td.photo_url  AS trainer_photo
-      FROM user_details ud
+      FROM participants ud
       LEFT JOIN participant_rounds pr
         ON pr.id = (
           SELECT p2.id
           FROM participant_rounds p2
-          WHERE p2.mspin = ud.mspin
+          WHERE p2.mpin = ud.mpin
           ORDER BY p2.id DESC
           LIMIT 1
         )
       LEFT JOIN trainer_details td
         ON td.name = pr.trainer_name
-      ORDER BY ud.mspin
+      ORDER BY ud.mpin
     `);
 
     const [rounds] = await pool.query(`
-      SELECT mspin, round_name, trainer_name, score
+      SELECT mpin, round_name, trainer_name, score
       FROM participant_rounds
-      ORDER BY mspin, id
+      ORDER BY mpin, id
     `);
 
     const [results] = await pool.query(`
-      SELECT mspin, percentage, total_time, status, rounds_status
+      SELECT mpin, percentage, total_time, status, rounds_status
       FROM user_result
     `);
 
@@ -83,32 +83,31 @@ app.get('/api/grid', async (_req, res) => {
 
     const roundsByUser = {};
     for (const r of rounds) {
-      if (!roundsByUser[r.mspin]) roundsByUser[r.mspin] = [];
-      roundsByUser[r.mspin].push({
+      if (!roundsByUser[r.mpin]) roundsByUser[r.mpin] = [];
+      roundsByUser[r.mpin].push({
         roundName:   r.round_name,
         trainerName: r.trainer_name,
         score:       r.score,
-        status:      r.status,
       });
     }
 
     const resultByUser = {};
-    for (const r of results) resultByUser[r.mspin] = r;
+    for (const r of results) resultByUser[r.mpin] = r;
 
     const trainers = trainerRows.map((t) => {
       const assigned = users
         .filter((u) => u.trainer_id === t.id)
         .map((u) => {
-          const ur = resultByUser[u.mspin] || {};
+          const ur = resultByUser[u.mpin] || {};
           return {
-            mspin:        u.mspin,
+            mpin:         u.mpin,
             name:         u.name,
             role:         u.role,
             percentage:   ur.percentage    ?? 0,
             totalTime:    ur.total_time    ?? '00:00:00',
             status:       ur.status        ?? 'Fail',
             roundsStatus: ur.rounds_status ?? 'In Progress',
-            rounds:       roundsByUser[u.mspin] || [],
+            rounds:       roundsByUser[u.mpin] || [],
           };
         });
 
@@ -159,17 +158,17 @@ app.get('/api/grid', async (_req, res) => {
 app.get('/api/dashboard', async (_req, res) => {
   try {
     const [users] = await pool.query(`
-      SELECT mspin, name, region, zone
-      FROM user_details
+      SELECT mpin, name, region, zone, round_start_time
+      FROM participants
     `);
 
     const [rounds] = await pool.query(`
-      SELECT mspin, trainer_name, round_name, score, end_time
+      SELECT mpin, trainer_name, round_name, score, end_time
       FROM participant_rounds
     `);
 
     const [results] = await pool.query(`
-      SELECT mspin, percentage, total_time, status, rounds_status
+      SELECT mpin, percentage, total_time, status, rounds_status
       FROM user_result
     `);
 
@@ -180,10 +179,10 @@ app.get('/api/dashboard', async (_req, res) => {
     `);
 
     const resultByUser = {};
-    for (const r of results) resultByUser[r.mspin] = r;
+    for (const r of results) resultByUser[r.mpin] = r;
 
-    const userByMspin = {};
-    for (const u of users) userByMspin[u.mspin] = u;
+    const userByMpin = {};
+    for (const u of users) userByMpin[u.mpin] = u;
 
     // ---- todayLive ----
     const today = new Date();
@@ -192,12 +191,12 @@ app.get('/api/dashboard', async (_req, res) => {
     const dd   = String(today.getDate()).padStart(2, '0');
     const todayDate = `${yyyy}-${mm}-${dd}`;
 
-    const todayRounds = rounds.filter(
-      (r) => r.start_time && r.start_time.slice(0, 10) === todayDate
+    // Today's users = participants whose round_start_time falls on today
+    const todayUsers = users.filter(
+      (u) => u.round_start_time && String(u.round_start_time).slice(0, 10) === todayDate
     );
-
-    const todayMspins = new Set(todayRounds.map((r) => r.mspin));
-    const todayResults = results.filter((r) => todayMspins.has(r.mspin));
+    const todayMpins = new Set(todayUsers.map((u) => u.mpin));
+    const todayResults = results.filter((r) => todayMpins.has(r.mpin));
 
     const tPass = todayResults.filter((r) => r.status === 'Pass').length;
     const tFail = todayResults.filter((r) => r.status === 'Fail').length;
@@ -217,7 +216,7 @@ app.get('/api/dashboard', async (_req, res) => {
       (r) => r.rounds_status === 'Completed'
     ).length;
 
-    const todayInProgress = todayMspins.size - todayCompleted;
+    const todayInProgress = todayMpins.size - todayCompleted;
 
     const activeTrainers = new Set(
       rounds.map((r) => r.trainer_name).filter(Boolean)
@@ -225,7 +224,7 @@ app.get('/api/dashboard', async (_req, res) => {
 
     const todayLive = {
       date:           todayDate,
-      scheduled:      todayMspins.size,
+      scheduled:      todayMpins.size,
       completed:      todayCompleted,
       inProgress:     todayInProgress,
       passRate:       tPassRate,
@@ -236,7 +235,7 @@ app.get('/api/dashboard', async (_req, res) => {
     // ---- regionSummary ----
     const regionBuckets = {};
     for (const r of results) {
-      const u = userByMspin[r.mspin];
+      const u = userByMpin[r.mpin];
       if (!u) continue;
       const key = `${u.region || '—'}|${u.zone || '—'}`;
       if (!regionBuckets[key]) {
@@ -272,31 +271,33 @@ app.get('/api/dashboard', async (_req, res) => {
 
     // ---- trainerSummary ----
     const trainerSummary = trainerRows.map((t) => {
+      // Users whose LAST round was taught by this trainer
       const assignedUsers = users.filter((u) => {
-        const userRounds = rounds.filter((r) => r.mspin === u.mspin);
+        const userRounds = rounds.filter((r) => r.mpin === u.mpin);
         if (userRounds.length === 0) return false;
         return userRounds[userRounds.length - 1].trainer_name === t.name;
       });
 
       const assigned = assignedUsers.length;
       const pass = assignedUsers.filter((u) => {
-        const ur = resultByUser[u.mspin];
+        const ur = resultByUser[u.mpin];
         return ur && ur.status === 'Pass';
       }).length;
       const fail = assignedUsers.filter((u) => {
-        const ur = resultByUser[u.mspin];
+        const ur = resultByUser[u.mpin];
         return ur && ur.status === 'Fail';
       }).length;
 
       const secs = assignedUsers.reduce((sum, u) => {
-        const ur = resultByUser[u.mspin];
+        const ur = resultByUser[u.mpin];
         return sum + (ur ? hmsToSeconds(ur.total_time) : 0);
       }, 0);
 
+      // Round journey: count finished rounds taught by this trainer
       const roundJourney = {};
       rounds.forEach((r) => {
         if (r.trainer_name !== t.name) return;
-        if (r.status !== 'completed') return;
+        if (r.score == null || r.end_time == null) return;
         const key = r.round_name.toLowerCase().replace(/\s+/g, '');
         roundJourney[key] = (roundJourney[key] || 0) + 1;
       });
@@ -323,7 +324,9 @@ app.get('/api/dashboard', async (_req, res) => {
 
     // ---- contestTotals ----
     const totalScheduled = users.length;
-    const totalAttempted = rounds.filter((r) => r.status === 'completed').length;
+    const totalAttempted = rounds.filter(
+      (r) => r.score != null && r.end_time != null
+    ).length;
     const overallPass = results.filter((r) => r.status === 'Pass').length;
     const overallFail = results.filter((r) => r.status === 'Fail').length;
     const overallPassRate = (overallPass + overallFail) > 0
@@ -372,19 +375,19 @@ app.get('/api/filters', async (_req, res) => {
   try {
     const [dateRows] = await pool.query(`
       SELECT DISTINCT DATE(round_start_time) AS d
-      FROM user_details
+      FROM participants
       WHERE round_start_time IS NOT NULL
       ORDER BY d DESC
     `);
 
     const [zoneRows] = await pool.query(`
-      SELECT DISTINCT zone FROM user_details
+      SELECT DISTINCT zone FROM participants
       WHERE zone IS NOT NULL AND zone <> ''
       ORDER BY zone
     `);
 
     const [regionRows] = await pool.query(`
-      SELECT DISTINCT region FROM user_details
+      SELECT DISTINCT region FROM participants
       WHERE region IS NOT NULL AND region <> ''
       ORDER BY region
     `);
@@ -396,25 +399,25 @@ app.get('/api/filters', async (_req, res) => {
     `);
 
     const [roleRows] = await pool.query(`
-      SELECT DISTINCT role FROM user_details
+      SELECT DISTINCT role FROM participants
       WHERE role IS NOT NULL AND role <> ''
       ORDER BY role
     `);
 
     const [agencyRows] = await pool.query(`
-      SELECT DISTINCT agency FROM user_details
+      SELECT DISTINCT agency FROM participants
       WHERE agency IS NOT NULL AND agency <> ''
       ORDER BY agency
     `);
 
     const [dealerNameRows] = await pool.query(`
-      SELECT DISTINCT dealer_name FROM user_details
+      SELECT DISTINCT dealer_name FROM participants
       WHERE dealer_name IS NOT NULL AND dealer_name <> ''
       ORDER BY dealer_name
     `);
 
     const [dealerCodeRows] = await pool.query(`
-      SELECT DISTINCT dealer_code FROM user_details
+      SELECT DISTINCT dealer_code FROM participants
       WHERE dealer_code IS NOT NULL AND dealer_code <> ''
       ORDER BY dealer_code
     `);
@@ -469,12 +472,12 @@ app.get('/api/export/users', async (req, res) => {
     const [rows] = await pool.query(
       `
       SELECT
-        ud.mspin, ud.name, ud.role, ud.agency, ud.region, ud.zone,
+        ud.mpin, ud.name, ud.role, ud.agency, ud.region, ud.zone,
         ud.city, ud.dealer_name, ud.dealer_code,
         ur.trainer, ur.percentage, ur.status AS pass_fail,
         ur.rounds_status, ur.total_time, ur.updated_at
-      FROM user_details ud
-      LEFT JOIN user_result ur ON ur.mspin = ud.mspin
+      FROM participants ud
+      LEFT JOIN user_result ur ON ur.mpin = ud.mpin
       ${whereSql}
       ORDER BY ud.region, ud.zone, ud.name
       `,
@@ -490,7 +493,7 @@ app.get('/api/export/users', async (req, res) => {
     });
 
     ws.columns = [
-      { header: 'MSPIN',         key: 'mspin',         width: 16 },
+      { header: 'MPIN',          key: 'mpin',          width: 16 },
       { header: 'Name',          key: 'name',          width: 24 },
       { header: 'Role',          key: 'role',          width: 16 },
       { header: 'Agency',        key: 'agency',        width: 20 },
@@ -523,7 +526,7 @@ app.get('/api/export/users', async (req, res) => {
 
     rows.forEach((r) => {
       const row = ws.addRow({
-        mspin:         r.mspin,
+        mpin:          r.mpin,
         name:          r.name,
         role:          r.role,
         agency:        r.agency,
@@ -752,4 +755,10 @@ io.on('connection', (socket) => {
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`✅ API + Socket.IO running → http://localhost:${PORT}`);
+  console.log(`   GET /api/grid`);
+  console.log(`   GET /api/dashboard`);
+  console.log(`   GET /api/filters`);
+  console.log(`   GET /api/export/users`);
+  console.log(`   GET /api/chat/:trainerId/messages`);
+  console.log(`   GET /api/chat/summary`);
 });
