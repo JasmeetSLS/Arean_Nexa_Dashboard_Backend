@@ -65,7 +65,7 @@ app.get('/api/grid', async (_req, res) => {
     `);
 
     const [rounds] = await pool.query(`
-      SELECT mspin, round_name, trainer_name, score, status
+      SELECT mspin, round_name, trainer_name, score
       FROM participant_rounds
       ORDER BY mspin, id
     `);
@@ -164,7 +164,7 @@ app.get('/api/dashboard', async (_req, res) => {
     `);
 
     const [rounds] = await pool.query(`
-      SELECT mspin, trainer_name, round_name, score, status, start_time, end_time
+      SELECT mspin, trainer_name, round_name, score, end_time
       FROM participant_rounds
     `);
 
@@ -371,9 +371,9 @@ app.get('/api/dashboard', async (_req, res) => {
 app.get('/api/filters', async (_req, res) => {
   try {
     const [dateRows] = await pool.query(`
-      SELECT DISTINCT DATE(start_time) AS d
-      FROM participant_rounds
-      WHERE start_time IS NOT NULL
+      SELECT DISTINCT DATE(round_start_time) AS d
+      FROM user_details
+      WHERE round_start_time IS NOT NULL
       ORDER BY d DESC
     `);
 
