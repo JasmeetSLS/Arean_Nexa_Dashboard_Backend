@@ -11,7 +11,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ---- MySQL Pool ----
 const pool = mysql.createPool({
   host: process.env.DB_HOST || 'localhost',
   user: process.env.DB_USER || 'root',
@@ -23,7 +22,6 @@ const pool = mysql.createPool({
   dateStrings: true,
 });
 
-// ---- Helpers ----
 const hmsToSeconds = (hms) => {
   if (!hms || typeof hms !== 'string') return 0;
   const [h = '0', m = '0', s = '0'] = hms.split(':');
@@ -47,9 +45,9 @@ app.get('/api/grid', async (_req, res) => {
         ud.mpin,
         ud.name,
         ud.role,
-        td.id         AS trainer_id,
-        td.name       AS trainer_name,
-        td.photo_url  AS trainer_photo
+        t.id         AS trainer_id,
+        t.name       AS trainer_name,
+        t.photo_url  AS trainer_photo
       FROM participants ud
       LEFT JOIN participant_rounds pr
         ON pr.id = (
@@ -59,8 +57,8 @@ app.get('/api/grid', async (_req, res) => {
           ORDER BY p2.id DESC
           LIMIT 1
         )
-      LEFT JOIN trainer_details td
-        ON td.name = pr.trainer_name
+      LEFT JOIN trainers t
+        ON t.name = pr.trainer_name
       ORDER BY ud.mpin
     `);
 
@@ -77,7 +75,7 @@ app.get('/api/grid', async (_req, res) => {
 
     const [trainerRows] = await pool.query(`
       SELECT id, name, photo_url
-      FROM trainer_details
+      FROM trainers
       ORDER BY id
     `);
 
@@ -174,7 +172,7 @@ app.get('/api/dashboard', async (_req, res) => {
 
     const [trainerRows] = await pool.query(`
       SELECT id, name, photo_url
-      FROM trainer_details
+      FROM trainers
       ORDER BY id
     `);
 
@@ -191,7 +189,6 @@ app.get('/api/dashboard', async (_req, res) => {
     const dd   = String(today.getDate()).padStart(2, '0');
     const todayDate = `${yyyy}-${mm}-${dd}`;
 
-    // Today's users = participants whose round_start_time falls on today
     const todayUsers = users.filter(
       (u) => u.round_start_time && String(u.round_start_time).slice(0, 10) === todayDate
     );
@@ -271,7 +268,6 @@ app.get('/api/dashboard', async (_req, res) => {
 
     // ---- trainerSummary ----
     const trainerSummary = trainerRows.map((t) => {
-      // Users whose LAST round was taught by this trainer
       const assignedUsers = users.filter((u) => {
         const userRounds = rounds.filter((r) => r.mpin === u.mpin);
         if (userRounds.length === 0) return false;
@@ -293,7 +289,6 @@ app.get('/api/dashboard', async (_req, res) => {
         return sum + (ur ? hmsToSeconds(ur.total_time) : 0);
       }, 0);
 
-      // Round journey: count finished rounds taught by this trainer
       const roundJourney = {};
       rounds.forEach((r) => {
         if (r.trainer_name !== t.name) return;
@@ -394,7 +389,7 @@ app.get('/api/filters', async (_req, res) => {
 
     const [trainerRows] = await pool.query(`
       SELECT id, name, photo_url
-      FROM trainer_details
+      FROM trainers
       ORDER BY name
     `);
 
@@ -625,7 +620,7 @@ app.get('/api/chat/summary', async (_req, res) => {
         (SELECT created_at FROM chat_messages c WHERE c.trainer_id = t.id ORDER BY id DESC LIMIT 1) AS last_at,
         (SELECT COUNT(*)   FROM chat_messages c
           WHERE c.trainer_id = t.id AND c.sender_type = 'trainer' AND c.is_read = 0) AS unread
-      FROM trainer_details t
+      FROM trainers t
       ORDER BY (last_at IS NULL), last_at DESC, t.name
     `);
 
@@ -658,7 +653,6 @@ const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
 });
 
-// Track online trainers: { trainerId: Set<socketId> }
 const onlineTrainers = new Map();
 
 io.on('connection', (socket) => {
