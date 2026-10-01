@@ -22,48 +22,52 @@ USE `skill_contest_portal`;
 -- Dumping structure for table skill_contest_portal.chat_messages
 CREATE TABLE IF NOT EXISTS `chat_messages` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-  `trainer_id` int unsigned NOT NULL,
-  `sender_type` enum('panel','trainer') NOT NULL,
-  `sender_name` varchar(120) NOT NULL,
+  `sender_type` enum('command','trainer') NOT NULL,
+  `sender_id` int unsigned NOT NULL,
+  `receiver_type` enum('command','trainer') NOT NULL,
+  `receiver_id` int unsigned NOT NULL,
   `message` text NOT NULL,
   `is_read` tinyint(1) NOT NULL DEFAULT '0',
   `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  KEY `idx_trainer_created` (`trainer_id`,`created_at`),
-  KEY `idx_trainer_unread` (`trainer_id`,`is_read`)
-) ENGINE=InnoDB AUTO_INCREMENT=29 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+  KEY `idx_conv` (`sender_type`,`sender_id`,`receiver_type`,`receiver_id`,`created_at`),
+  KEY `idx_receiver` (`receiver_type`,`receiver_id`,`is_read`,`created_at`),
+  KEY `idx_trainer_conv` (`sender_type`,`sender_id`,`receiver_type`,`receiver_id`,`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=22 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- Data exporting was unselected.
+
+-- Dumping structure for table skill_contest_portal.command_center_users
+CREATE TABLE IF NOT EXISTS `command_center_users` (
+  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `username` varchar(60) NOT NULL,
+  `password` varchar(255) NOT NULL,
+  `status` enum('active','inactive') NOT NULL DEFAULT 'active',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_cc_username` (`username`)
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- Data exporting was unselected.
 
 -- Dumping structure for table skill_contest_portal.participant_rounds
 CREATE TABLE IF NOT EXISTS `participant_rounds` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-  `mspin` varchar(20) NOT NULL,
+  `mpin` varchar(20) NOT NULL,
   `trainer_name` varchar(120) DEFAULT NULL,
   `round_name` varchar(50) NOT NULL,
   `score` tinyint unsigned DEFAULT NULL COMMENT 'Max 30; NULL while running',
   `end_time` datetime DEFAULT NULL,
   PRIMARY KEY (`id`),
-  KEY `idx_round_mspin` (`mspin`),
+  KEY `idx_round_mspin` (`mpin`),
   CONSTRAINT `chk_score` CHECK (((`score` is null) or (`score` between 0 and 30)))
 ) ENGINE=InnoDB AUTO_INCREMENT=251 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- Data exporting was unselected.
 
--- Dumping structure for table skill_contest_portal.trainer_details
-CREATE TABLE IF NOT EXISTS `trainer_details` (
+-- Dumping structure for table skill_contest_portal.participants
+CREATE TABLE IF NOT EXISTS `participants` (
   `id` int unsigned NOT NULL AUTO_INCREMENT,
-  `name` varchar(120) NOT NULL,
-  `photo_url` varchar(255) DEFAULT NULL,
-  PRIMARY KEY (`id`)
-) ENGINE=InnoDB AUTO_INCREMENT=11 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table skill_contest_portal.user_details
-CREATE TABLE IF NOT EXISTS `user_details` (
-  `id` int unsigned NOT NULL AUTO_INCREMENT,
-  `mspin` varchar(20) NOT NULL,
+  `mpin` varchar(20) NOT NULL,
   `name` varchar(120) NOT NULL,
   `role` varchar(50) DEFAULT NULL,
   `agency` varchar(80) DEFAULT NULL,
@@ -74,16 +78,26 @@ CREATE TABLE IF NOT EXISTS `user_details` (
   `dealer_code` varchar(20) DEFAULT NULL,
   `round_start_time` datetime DEFAULT NULL,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uq_user_mspin` (`mspin`),
+  UNIQUE KEY `uq_user_mspin` (`mpin`),
   KEY `idx_round_start_time` (`round_start_time`)
 ) ENGINE=InnoDB AUTO_INCREMENT=181 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- Data exporting was unselected.
+
+-- Dumping structure for table skill_contest_portal.trainers
+CREATE TABLE IF NOT EXISTS `trainers` (
+  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(120) NOT NULL,
+  `photo_url` varchar(255) DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=11 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- Data exporting was unselected.
 
 -- Dumping structure for table skill_contest_portal.user_result
 CREATE TABLE IF NOT EXISTS `user_result` (
   `id` int unsigned NOT NULL AUTO_INCREMENT,
-  `mspin` varchar(20) NOT NULL,
+  `mpin` varchar(20) NOT NULL,
   `trainer` varchar(120) DEFAULT NULL COMMENT 'Latest/current trainer',
   `percentage` decimal(5,2) NOT NULL DEFAULT '0.00' COMMENT 'sum(score)/150*100',
   `status` enum('Pass','Fail') NOT NULL DEFAULT 'Fail',
@@ -91,7 +105,7 @@ CREATE TABLE IF NOT EXISTS `user_result` (
   `total_time` varchar(10) DEFAULT NULL,
   `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uq_result_mspin` (`mspin`)
+  UNIQUE KEY `uq_result_mspin` (`mpin`)
 ) ENGINE=InnoDB AUTO_INCREMENT=91 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- Data exporting was unselected.
@@ -113,11 +127,9 @@ CREATE TRIGGER `trg_participant_rounds_after_insert` AFTER INSERT ON `participan
     DECLARE v_total_secs     BIGINT DEFAULT 0;
     DECLARE v_total_time     VARCHAR(10) DEFAULT '00:00:00';
 
-    -- ---- Total score & percentage ----
-    SELECT COALESCE(SUM(score), 0)
-      INTO v_total_score
-      FROM participant_rounds
-     WHERE mspin = NEW.mspin;
+    -- Total score & percentage
+    SELECT COALESCE(SUM(score), 0) INTO v_total_score
+      FROM participant_rounds WHERE mpin = NEW.mpin;
 
     SET v_percentage = ROUND((v_total_score / 150) * 100, 2);
 
@@ -125,20 +137,15 @@ CREATE TRIGGER `trg_participant_rounds_after_insert` AFTER INSERT ON `participan
     ELSE                        SET v_status = 'Fail';
     END IF;
 
-    -- ---- Latest trainer ----
-    SELECT trainer_name
-      INTO v_latest_trainer
-      FROM participant_rounds
-     WHERE mspin = NEW.mspin
-     ORDER BY id DESC
-     LIMIT 1;
+    -- Latest trainer
+    SELECT trainer_name INTO v_latest_trainer
+      FROM participant_rounds WHERE mpin = NEW.mpin
+      ORDER BY id DESC LIMIT 1;
 
-    -- ---- Rounds finished vs total ----
-    SELECT COUNT(*),
-           SUM(score IS NOT NULL AND end_time IS NOT NULL)
+    -- Rounds finished vs total
+    SELECT COUNT(*), SUM(score IS NOT NULL AND end_time IS NOT NULL)
       INTO v_total_rounds, v_finished
-      FROM participant_rounds
-     WHERE mspin = NEW.mspin;
+      FROM participant_rounds WHERE mpin = NEW.mpin;
 
     IF v_total_rounds >= 5 AND v_finished = 5 THEN
         SET v_rounds_status = 'Completed';
@@ -146,26 +153,16 @@ CREATE TRIGGER `trg_participant_rounds_after_insert` AFTER INSERT ON `participan
         SET v_rounds_status = 'In Progress';
     END IF;
 
-    -- ---- round_start_time ----
-    SELECT round_start_time
-      INTO v_round_start
-      FROM user_details
-     WHERE mspin = NEW.mspin
-     LIMIT 1;
+    -- round_start_time
+    SELECT round_start_time INTO v_round_start
+      FROM participants WHERE mpin = NEW.mpin LIMIT 1;
 
-    -- ---- Last finished round's end_time ----
-    SELECT MAX(end_time)
-      INTO v_last_end
+    -- Last finished round
+    SELECT MAX(end_time) INTO v_last_end
       FROM participant_rounds
-     WHERE mspin = NEW.mspin
-       AND score    IS NOT NULL
-       AND end_time IS NOT NULL;
+     WHERE mpin = NEW.mpin AND score IS NOT NULL AND end_time IS NOT NULL;
 
-    -- ---- total_time when at least 1 round finished ----
-    IF v_finished > 0
-       AND v_round_start IS NOT NULL
-       AND v_last_end    IS NOT NULL
-    THEN
+    IF v_finished > 0 AND v_round_start IS NOT NULL AND v_last_end IS NOT NULL THEN
         SET v_total_secs = TIMESTAMPDIFF(SECOND, v_round_start, v_last_end);
         IF v_total_secs < 0 THEN SET v_total_secs = 0; END IF;
     ELSE
@@ -175,16 +172,12 @@ CREATE TRIGGER `trg_participant_rounds_after_insert` AFTER INSERT ON `participan
     SET v_total_time = CONCAT(
         LPAD(FLOOR(v_total_secs / 3600), 2, '0'), ':',
         LPAD(FLOOR((v_total_secs % 3600) / 60), 2, '0'), ':',
-        LPAD(v_total_secs % 60, 2, '0')
-    );
+        LPAD(v_total_secs % 60, 2, '0'));
 
-    -- ---- Does user_result already have this mspin? ----
-    SELECT COUNT(*) INTO v_exists
-      FROM user_result
-     WHERE mspin = NEW.mspin;
+    -- Upsert user_result
+    SELECT COUNT(*) INTO v_exists FROM user_result WHERE mpin = NEW.mpin;
 
     IF v_exists > 0 THEN
-        -- UPDATE existing row (id stays the same)
         UPDATE user_result
            SET trainer       = v_latest_trainer,
                percentage    = v_percentage,
@@ -192,13 +185,12 @@ CREATE TRIGGER `trg_participant_rounds_after_insert` AFTER INSERT ON `participan
                rounds_status = v_rounds_status,
                total_time    = v_total_time,
                updated_at    = CURRENT_TIMESTAMP
-         WHERE mspin = NEW.mspin;
+         WHERE mpin = NEW.mpin;
     ELSE
-        -- INSERT new row (auto-increment id)
         INSERT INTO user_result
-            (mspin, trainer, percentage, status, rounds_status, total_time)
+            (mpin, trainer, percentage, status, rounds_status, total_time)
         VALUES
-            (NEW.mspin, v_latest_trainer, v_percentage, v_status,
+            (NEW.mpin, v_latest_trainer, v_percentage, v_status,
              v_rounds_status, v_total_time);
     END IF;
 END//
@@ -222,10 +214,8 @@ CREATE TRIGGER `trg_participant_rounds_after_update` AFTER UPDATE ON `participan
     DECLARE v_total_secs     BIGINT DEFAULT 0;
     DECLARE v_total_time     VARCHAR(10) DEFAULT '00:00:00';
 
-    SELECT COALESCE(SUM(score), 0)
-      INTO v_total_score
-      FROM participant_rounds
-     WHERE mspin = NEW.mspin;
+    SELECT COALESCE(SUM(score), 0) INTO v_total_score
+      FROM participant_rounds WHERE mpin = NEW.mpin;
 
     SET v_percentage = ROUND((v_total_score / 150) * 100, 2);
 
@@ -233,18 +223,13 @@ CREATE TRIGGER `trg_participant_rounds_after_update` AFTER UPDATE ON `participan
     ELSE                        SET v_status = 'Fail';
     END IF;
 
-    SELECT trainer_name
-      INTO v_latest_trainer
-      FROM participant_rounds
-     WHERE mspin = NEW.mspin
-     ORDER BY id DESC
-     LIMIT 1;
+    SELECT trainer_name INTO v_latest_trainer
+      FROM participant_rounds WHERE mpin = NEW.mpin
+      ORDER BY id DESC LIMIT 1;
 
-    SELECT COUNT(*),
-           SUM(score IS NOT NULL AND end_time IS NOT NULL)
+    SELECT COUNT(*), SUM(score IS NOT NULL AND end_time IS NOT NULL)
       INTO v_total_rounds, v_finished
-      FROM participant_rounds
-     WHERE mspin = NEW.mspin;
+      FROM participant_rounds WHERE mpin = NEW.mpin;
 
     IF v_total_rounds >= 5 AND v_finished = 5 THEN
         SET v_rounds_status = 'Completed';
@@ -252,23 +237,14 @@ CREATE TRIGGER `trg_participant_rounds_after_update` AFTER UPDATE ON `participan
         SET v_rounds_status = 'In Progress';
     END IF;
 
-    SELECT round_start_time
-      INTO v_round_start
-      FROM user_details
-     WHERE mspin = NEW.mspin
-     LIMIT 1;
+    SELECT round_start_time INTO v_round_start
+      FROM participants WHERE mpin = NEW.mpin LIMIT 1;
 
-    SELECT MAX(end_time)
-      INTO v_last_end
+    SELECT MAX(end_time) INTO v_last_end
       FROM participant_rounds
-     WHERE mspin = NEW.mspin
-       AND score    IS NOT NULL
-       AND end_time IS NOT NULL;
+     WHERE mpin = NEW.mpin AND score IS NOT NULL AND end_time IS NOT NULL;
 
-    IF v_finished > 0
-       AND v_round_start IS NOT NULL
-       AND v_last_end    IS NOT NULL
-    THEN
+    IF v_finished > 0 AND v_round_start IS NOT NULL AND v_last_end IS NOT NULL THEN
         SET v_total_secs = TIMESTAMPDIFF(SECOND, v_round_start, v_last_end);
         IF v_total_secs < 0 THEN SET v_total_secs = 0; END IF;
     ELSE
@@ -278,12 +254,9 @@ CREATE TRIGGER `trg_participant_rounds_after_update` AFTER UPDATE ON `participan
     SET v_total_time = CONCAT(
         LPAD(FLOOR(v_total_secs / 3600), 2, '0'), ':',
         LPAD(FLOOR((v_total_secs % 3600) / 60), 2, '0'), ':',
-        LPAD(v_total_secs % 60, 2, '0')
-    );
+        LPAD(v_total_secs % 60, 2, '0'));
 
-    SELECT COUNT(*) INTO v_exists
-      FROM user_result
-     WHERE mspin = NEW.mspin;
+    SELECT COUNT(*) INTO v_exists FROM user_result WHERE mpin = NEW.mpin;
 
     IF v_exists > 0 THEN
         UPDATE user_result
@@ -293,12 +266,12 @@ CREATE TRIGGER `trg_participant_rounds_after_update` AFTER UPDATE ON `participan
                rounds_status = v_rounds_status,
                total_time    = v_total_time,
                updated_at    = CURRENT_TIMESTAMP
-         WHERE mspin = NEW.mspin;
+         WHERE mpin = NEW.mpin;
     ELSE
         INSERT INTO user_result
-            (mspin, trainer, percentage, status, rounds_status, total_time)
+            (mpin, trainer, percentage, status, rounds_status, total_time)
         VALUES
-            (NEW.mspin, v_latest_trainer, v_percentage, v_status,
+            (NEW.mpin, v_latest_trainer, v_percentage, v_status,
              v_rounds_status, v_total_time);
     END IF;
 END//

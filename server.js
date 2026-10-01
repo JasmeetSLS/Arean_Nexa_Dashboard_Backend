@@ -16,7 +16,7 @@ const { requireAuth } = require('./middleware/auth');
 
 app.use('/api', authRoutes);
 app.use('/api',requireAuth, setupRoutes);
-app.use('/api', chatRoutes);
+app.use('/api',requireAuth, chatRoutes);
 
 // ---- Health check ----
 app.get('/health', (_req, res) => res.json({ ok: true }));

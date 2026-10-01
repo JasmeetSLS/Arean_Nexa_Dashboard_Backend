@@ -15,7 +15,7 @@ exports.login = async (req, res) => {
 
     const [rows] = await pool.query(
       `SELECT id, username, password, status
-         FROM command_center_users
+         FROM admin
         WHERE username = ?
         LIMIT 1`,
       [username.trim()]
