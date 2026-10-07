@@ -1,189 +1,178 @@
 const { Server } = require('socket.io');
-const jwt = require('jsonwebtoken');
+const jwt  = require('jsonwebtoken');
 const pool = require('../config/db');
+const { JWT_SECRET } = require('../middleware/auth');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
+let io = null;
 
-function initSocket(httpServer) {
-  const io = new Server(httpServer, {
+const trainerRoom = (id) => `trainer:${id}`;
+const ADMIN_ROOM  = 'admins';
+
+const normalizeRow = (r) => ({
+  id:           r.id,
+  senderType:   r.sender_type,
+  senderId:     r.sender_id,
+  receiverType: r.receiver_type,
+  receiverId:   r.receiver_id,
+  message:      r.message,
+  isRead:       !!r.is_read,
+  createdAt:    r.created_at,
+});
+
+function initSocket(server) {
+  io = new Server(server, {
     cors: { origin: '*', methods: ['GET', 'POST'] },
   });
 
-  // ---- Authenticate every socket ----
   io.use((socket, next) => {
-    const token = socket.handshake.auth?.token;
-    if (!token) return next(new Error('Missing auth token'));
     try {
+      const token =
+        socket.handshake.auth?.token ||
+        socket.handshake.headers?.authorization?.replace('Bearer ', '');
+
+      if (!token) return next(new Error('Missing token'));
+
       const payload = jwt.verify(token, JWT_SECRET);
-      socket.user = { id: payload.sub, username: payload.username };
+      socket.user = {
+        id:       payload.sub,
+        username: payload.username,
+        name:     payload.name || payload.username,
+        type:     payload.type || 'admin',
+      };
       next();
     } catch {
-      next(new Error('Invalid auth token'));
+      next(new Error('Invalid or expired token'));
     }
   });
 
-  // ---- Online maps ----
-  const onlineTrainers = new Map();   // trainerId → Set<socketId>
-  const onlinePanels   = new Set();
-
-  const emitToTrainer = (trainerId, event, payload) => {
-    const set = onlineTrainers.get(Number(trainerId));
-    if (!set) return;
-    set.forEach((sid) => io.to(sid).emit(event, payload));
-  };
-
   io.on('connection', (socket) => {
-    console.log('[socket] connected', socket.id, 'user:', socket.user?.username);
+    const user    = socket.user;
+    const isAdmin = user.type === 'admin';
 
-    // =================================================================
-    // REGISTER
-    // =================================================================
-    socket.on('register', ({ role, trainerId, name }) => {
-      socket.role      = role;                            // 'panel' | 'trainer'
-      socket.trainerId = trainerId ? Number(trainerId) : null;
-      socket.name      = name || 'Unknown';
+    if (isAdmin) socket.join(ADMIN_ROOM);
+    else         socket.join(trainerRoom(user.id));
 
-      if (role === 'trainer' && socket.trainerId) {
-        if (!onlineTrainers.has(socket.trainerId)) {
-          onlineTrainers.set(socket.trainerId, new Set());
-        }
-        onlineTrainers.get(socket.trainerId).add(socket.id);
-
-        io.emit('trainer:online', { trainerId: socket.trainerId, online: true });
-      }
-
-      if (role === 'panel') {
-        socket.join('panel');
-        onlinePanels.add(socket.id);
-        socket.emit('trainer:onlineList', Array.from(onlineTrainers.keys()));
+    socket.on('chat:join', ({ trainerId }) => {
+      if (!trainerId) return;
+      if (isAdmin || Number(trainerId) === Number(user.id)) {
+        socket.join(trainerRoom(trainerId));
       }
     });
 
-    // =================================================================
-    // SEND MESSAGE
-    //   payload: {
-    //     senderType, senderId, senderName,
-    //     receiverType, receiverId,
-    //     message
-    //   }
-    // =================================================================
-    socket.on('message:send', async (payload, ack) => {
-      try {
-        const {
-          senderType, senderId, senderName,
-          receiverType, receiverId,
-          message,
-        } = payload || {};
+    socket.on('chat:leave', ({ trainerId }) => {
+      if (trainerId) socket.leave(trainerRoom(trainerId));
+    });
 
-        if (!senderType || !senderId || !receiverType || !receiverId || !message?.trim()) {
-          return ack?.({ ok: false, error: 'Missing fields' });
+    socket.on('chat:send', async (payload, ack) => {
+      try {
+        const trainerId = Number(payload?.trainerId);
+        const message   = String(payload?.message || '').trim();
+        if (!trainerId || !message) {
+          return ack?.({ ok: false, error: 'Invalid payload' });
+        }
+        if (!isAdmin && trainerId !== Number(user.id)) {
+          return ack?.({ ok: false, error: 'Forbidden' });
         }
 
-        const [result] = await pool.query(
+        const sender_type   = isAdmin ? 'admin'   : 'trainer';
+        const sender_id     = isAdmin ? user.id   : trainerId;
+        const receiver_type = isAdmin ? 'trainer' : 'admin';
+        const receiver_id   = isAdmin ? trainerId : user.id;
+
+        const [r] = await pool.query(
           `INSERT INTO chat_messages
              (sender_type, sender_id, receiver_type, receiver_id, message)
            VALUES (?, ?, ?, ?, ?)`,
-          [senderType, senderId, receiverType, receiverId, message.trim()]
+          [sender_type, sender_id, receiver_type, receiver_id, message]
         );
 
-        const saved = {
-          id:            result.insertId,
-          senderType,
-          senderId,
-          receiverType,
-          receiverId,
-          senderName,
-          message:       message.trim(),
-          isRead:        false,
-          createdAt:     new Date().toISOString(),
-        };
+        const [rows] = await pool.query(
+          `SELECT id, sender_type, sender_id, receiver_type, receiver_id,
+                  message, is_read, created_at
+             FROM chat_messages WHERE id = ?`,
+          [r.insertId]
+        );
+        const saved = normalizeRow(rows[0]);
 
-        // ---------------------------------------------------------------
-        // 1️⃣  Route to the RECEIVER
-        //     (use socket.to to avoid echoing to the sender twice)
-        // ---------------------------------------------------------------
-        if (receiverType === 'command') {
-          socket.to('panel').emit('message:new', saved);
-        } else if (receiverType === 'trainer') {
-          emitToTrainer(receiverId, 'message:new', saved);
+        io.to(trainerRoom(trainerId)).emit('chat:new', saved);
+        io.to(ADMIN_ROOM).emit('chat:new', saved);
+
+        if (sender_type === 'trainer') {
+          const [unread] = await pool.query(
+            `SELECT COUNT(*) AS n FROM chat_messages
+              WHERE sender_type = 'trainer' AND sender_id = ?
+                AND receiver_type = 'admin' AND is_read = 0`,
+            [trainerId]
+          );
+          io.to(ADMIN_ROOM).emit('chat:unread', { trainerId, unread: unread[0].n });
+        } else {
+          const [unread] = await pool.query(
+            `SELECT COUNT(*) AS n FROM chat_messages
+              WHERE sender_type = 'admin'
+                AND receiver_type = 'trainer' AND receiver_id = ?
+                AND is_read = 0`,
+            [trainerId]
+          );
+          io.to(trainerRoom(trainerId)).emit('chat:unread', { trainerId, unread: unread[0].n });
         }
 
-        // ---------------------------------------------------------------
-        // 2️⃣  ALSO echo to the SENDER'S OWN side
-        //     so their UI updates live even if the receiver is offline
-        // ---------------------------------------------------------------
-        if (senderType === 'command') {
-          io.to('panel').emit('message:new', saved);
-        } else if (senderType === 'trainer') {
-          emitToTrainer(senderId, 'message:new', saved);
-        }
-
-        ack?.({ ok: true, payload: saved });
+        ack?.({ ok: true, message: saved });
       } catch (err) {
-        console.error('[socket message:send]', err);
+        console.error('[socket chat:send]', err);
         ack?.({ ok: false, error: err.message });
       }
     });
 
-    // =================================================================
-    // MARK READ
-    //   payload: { trainerId, readerType: 'panel' | 'trainer' }
-    // =================================================================
-    socket.on('message:read', async ({ trainerId, readerType }) => {
+    socket.on('chat:read', async ({ trainerId }) => {
       try {
-        const tid = Number(trainerId);
-        if (!tid) return;
+        trainerId = Number(trainerId);
+        if (!trainerId) return;
+        if (!isAdmin && trainerId !== Number(user.id)) return;
 
-        if (readerType === 'panel') {
+        if (isAdmin) {
           await pool.query(
-            `UPDATE chat_messages
-                SET is_read = 1
-              WHERE sender_type = 'trainer'
-                AND sender_id = ?
-                AND receiver_type = 'command'
-                AND is_read = 0`,
-            [tid]
+            `UPDATE chat_messages SET is_read = 1
+              WHERE sender_type = 'trainer' AND sender_id = ?
+                AND receiver_type = 'admin' AND is_read = 0`,
+            [trainerId]
           );
         } else {
           await pool.query(
-            `UPDATE chat_messages
-                SET is_read = 1
-              WHERE sender_type = 'command'
-                AND receiver_type = 'trainer'
-                AND receiver_id = ?
+            `UPDATE chat_messages SET is_read = 1
+              WHERE sender_type = 'admin'
+                AND receiver_type = 'trainer' AND receiver_id = ?
                 AND is_read = 0`,
-            [tid]
+            [trainerId]
           );
         }
 
-        io.to('panel').emit('message:read', { trainerId: tid, readerType });
-        emitToTrainer(tid, 'message:read', { trainerId: tid, readerType });
+        const [unread] = await pool.query(
+          `SELECT COUNT(*) AS n FROM chat_messages
+            WHERE sender_type = 'trainer' AND sender_id = ?
+              AND receiver_type = 'admin' AND is_read = 0`,
+          [trainerId]
+        );
+
+        io.to(ADMIN_ROOM).emit('chat:unread', { trainerId, unread: unread[0].n });
+        io.to(trainerRoom(trainerId)).emit('chat:read', { trainerId });
       } catch (err) {
-        console.error('[socket message:read]', err);
+        console.error('[socket chat:read]', err);
       }
     });
 
-    // =================================================================
-    // DISCONNECT
-    // =================================================================
-    socket.on('disconnect', () => {
-      if (socket.role === 'trainer' && socket.trainerId) {
-        const set = onlineTrainers.get(socket.trainerId);
-        if (set) {
-          set.delete(socket.id);
-          if (set.size === 0) {
-            onlineTrainers.delete(socket.trainerId);
-            io.emit('trainer:online', { trainerId: socket.trainerId, online: false });
-          }
-        }
-      }
-      if (socket.role === 'panel') {
-        onlinePanels.delete(socket.id);
-      }
+    socket.on('chat:typing', ({ trainerId, isTyping }) => {
+      if (!trainerId) return;
+      socket.to(trainerRoom(trainerId)).emit('chat:typing', {
+        trainerId: Number(trainerId),
+        from:      isAdmin ? 'admin' : 'trainer',
+        isTyping:  !!isTyping,
+      });
     });
+
+    socket.on('disconnect', () => {});
   });
 
   return io;
 }
 
-module.exports = { initSocket };
+module.exports = { initSocket, getIO: () => io };
