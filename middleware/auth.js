@@ -1,23 +1,38 @@
-const jwt = require('jsonwebtoken');
+const JWTUtils = require('../utils/jwt.util');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
-
-function requireAuth(req, res, next) {
-  const header = req.headers.authorization || '';
-  let [scheme, token] = header.split(' ');
-  if (!token && req.query.token) token = req.query.token;
-
-  if (!token) {
-    return res.status(401).json({ success: false, error: 'Missing token' });
-  }
-
+module.exports = (req, res, next) => {
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    req.user = { id: payload.sub, username: payload.username };
-    next();
-  } catch {
-    return res.status(401).json({ success: false, error: 'Invalid or expired token' });
-  }
-}
+    const authHeader = req.headers.authorization;
 
-module.exports = { requireAuth, JWT_SECRET };
+    // allow ?token= (used by iframe embeds)
+    let token = null;
+    if (authHeader) {
+      token = authHeader.split(' ')[1];
+    } else if (req.query.token) {
+      token = req.query.token;
+    }
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        message: 'Token required',
+      });
+    }
+
+    const decoded = JWTUtils.verifyToken(token);
+
+    // ---- shape used by every controller ----
+    req.user = {
+      userId:   decoded.userId || decoded.sub,   // accept both
+      type:     decoded.type || 'admin',         // 'admin' | 'trainer'
+      username: decoded.username,
+    };
+
+    next();
+  } catch (error) {
+    return res.status(401).json({
+      success: false,
+      message: 'Invalid token',
+    });
+  }
+};

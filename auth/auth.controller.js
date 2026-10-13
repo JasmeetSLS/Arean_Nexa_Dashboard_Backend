@@ -1,54 +1,90 @@
-const bcrypt = require('bcryptjs');
-const jwt    = require('jsonwebtoken');
-const pool   = require('../config/db');
-const { JWT_SECRET } = require('../middleware/auth');
+const bcrypt   = require('bcryptjs');
+const pool     = require('../config/db');
+const JWTUtils = require('../utils/jwt.util');
 
-const JWT_EXPIRES = process.env.JWT_EXPIRES || '8h';
-
+// =====================================================================
+// POST /api/auth/login
+// body: { username, password, type }   type = 'admin' | 'trainer'
+// =====================================================================
 exports.login = async (req, res) => {
   try {
-    const { username, password } = req.body || {};
+    const { username, password, type = 'admin' } = req.body || {};
 
     if (!username || !password) {
-      return res.status(400).json({ success: false, error: 'Username and password required' });
+      return res.status(400).json({
+        success: false,
+        message: 'Username and password required',
+      });
     }
+
+    if (!['admin', 'trainer'].includes(type)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid type. Must be "admin" or "trainer".',
+      });
+    }
+
+    // ---- pick the right table based on type ----
+    const table = type === 'admin' ? 'admin' : 'trainers';
 
     const [rows] = await pool.query(
       `SELECT id, username, password, status
-         FROM admin
+         FROM ${table}
         WHERE username = ?
         LIMIT 1`,
       [username.trim()]
     );
 
-    if (rows.length === 0) {
-      return res.status(401).json({ success: false, error: 'Invalid username or password' });
+    if (!rows.length) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid username or password',
+      });
     }
 
     const user = rows[0];
 
-    if (user.status !== 'active') {
-      return res.status(403).json({ success: false, error: 'Account is inactive. Contact administrator.' });
+    // `trainers` has no status column — treat missing as active
+    if (user.status && user.status !== 'active') {
+      return res.status(403).json({
+        success: false,
+        message: 'Account is inactive',
+      });
+    }
+
+    if (!user.password) {
+      return res.status(401).json({
+        success: false,
+        message: 'Password not set for this account',
+      });
     }
 
     const ok = await bcrypt.compare(password, user.password);
     if (!ok) {
-      return res.status(401).json({ success: false, error: 'Invalid username or password' });
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid username or password',
+      });
     }
 
-    const token = jwt.sign(
-      { sub: user.id, username: user.username },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRES }
-    );
+    // ---- sign JWT ----
+    const token = JWTUtils.generateToken({
+      userId:   user.id,
+      username: user.username,
+      type,
+    });
 
     res.json({
       success: true,
       token,
-      user: { id: user.id, username: user.username, status: user.status },
+      user: {
+        userId:   user.id,
+        username: user.username,
+        type,
+      },
     });
   } catch (err) {
     console.error('[auth.login]', err);
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ success: false, message: err.message });
   }
 };

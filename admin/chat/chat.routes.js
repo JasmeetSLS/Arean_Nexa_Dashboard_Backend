@@ -1,18 +1,14 @@
 const express = require('express');
 const router  = express.Router();
-const chatController = require('./chat.controller');
+const ctrl    = require('./chat.controller');
 
-// Identity
-router.get ('/chatbot/me',               chatController.chatbotMe);
+router.get('/chatbot/me', ctrl.me);                 // who am I
 
-// Lists — MUST come before /chat/:trainerId/*
-router.get ('/chat/summary',             chatController.getChatSummary);
-router.get ('/chat/admins',              chatController.getAllAdmins);
-router.get ('/chat/trainers',            chatController.getAllTrainers);
+router.get('/users', ctrl.getUsers);                // step 2
+router.get('/conversations', ctrl.getConversations); // step 3
+router.post('/conversations', ctrl.createConversation); // step 4
+router.get('/conversations/:id/messages', ctrl.getMessages); // step 5
 
-// Conversation
-router.get ('/chat/:trainerId/messages', chatController.getChatHistory);
-router.post('/chat/:trainerId/read',     chatController.markChatRead);
-router.post('/chat/:trainerId/send',     chatController.sendChatMessage);
+router.post('/chat/trainer-token/:trainerId', ctrl.trainerToken);
 
 module.exports = router;

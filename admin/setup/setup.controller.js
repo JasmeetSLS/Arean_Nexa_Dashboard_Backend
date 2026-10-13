@@ -494,3 +494,205 @@ exports.exportUsers = async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 };
+
+// =====================================================================
+// GET /api/setup
+// =====================================================================
+exports.getSetup = async (_req, res) => {
+  try {
+    const [cfg] = await pool.query(
+      `SELECT id, project_name
+         FROM setup_config
+        WHERE status = 'active'
+        ORDER BY id DESC LIMIT 1`
+    );
+
+    if (!cfg.length) {
+      return res.json({ success: true, setup: null, fields: [] });
+    }
+
+    const [fields] = await pool.query(
+      `SELECT field_group, field_key, field_order, sort_order, is_selected
+         FROM setup_field_master
+        WHERE setup_config_id = ?
+        ORDER BY sort_order, field_order`,
+      [cfg[0].id]
+    );
+
+    res.json({
+      success: true,
+      setup: {
+        id: cfg[0].id,
+        projectName: cfg[0].project_name,
+      },
+      fields: fields.map((f) => ({
+        field_group: f.field_group,
+        field_key:   f.field_key,
+        field_order: f.field_order,
+        sort_order:  f.sort_order,
+        is_selected: !!f.is_selected,
+      })),
+    });
+  } catch (err) {
+    console.error('[setup.getSetup]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// =====================================================================
+// POST /api/setup
+// body: { projectName, fields:[{ field_group, field_key,
+//                                field_order, sort_order, is_selected }] }
+// =====================================================================
+exports.saveSetup = async (req, res) => {
+  const conn = await pool.getConnection();
+  try {
+    const { projectName, fields } = req.body;
+
+    if (!projectName || !String(projectName).trim()) {
+      return res.status(400).json({ success: false, error: 'projectName is required' });
+    }
+    if (!Array.isArray(fields) || fields.length === 0) {
+      return res.status(400).json({ success: false, error: 'fields array is required' });
+    }
+
+    await conn.beginTransaction();
+
+    // ---------- 1. setup_config : SELECT → UPDATE / INSERT ----------
+    const [cfg] = await conn.query(
+      `SELECT id FROM setup_config
+        WHERE status = 'active'
+        ORDER BY id DESC LIMIT 1`
+    );
+
+    let setupConfigId;
+    let configAction;
+
+    if (cfg.length) {
+      // UPDATE
+      setupConfigId = cfg[0].id;
+      await conn.query(
+        `UPDATE setup_config
+            SET project_name = ?
+          WHERE id = ?`,
+        [String(projectName).trim(), setupConfigId]
+      );
+
+      // safety: remove any stray duplicates for the same active config
+      await conn.query(
+        `DELETE FROM setup_config
+          WHERE status = 'active' AND id <> ?`,
+        [setupConfigId]
+      );
+
+      configAction = 'updated';
+    } else {
+      // INSERT
+      const [ins] = await conn.query(
+        `INSERT INTO setup_config (project_name, status)
+         VALUES (?, 'active')`,
+        [String(projectName).trim()]
+      );
+      setupConfigId = ins.insertId;
+      configAction  = 'inserted';
+    }
+
+    // ---------- 2. setup_field_master : delete + re-insert ----------
+    await conn.query(
+      `DELETE FROM setup_field_master WHERE setup_config_id = ?`,
+      [setupConfigId]
+    );
+
+    const rows = fields.map((f) => [
+      setupConfigId,
+      f.field_key,
+      f.field_group,
+      Number(f.field_order) || 0,
+      Number(f.sort_order)  || 0,
+      f.is_selected ? 1 : 0,
+    ]);
+
+    await conn.query(
+      `INSERT INTO setup_field_master
+         (setup_config_id, field_key, field_group, field_order, sort_order, is_selected)
+       VALUES ?`,
+      [rows]
+    );
+
+    // ---------- 3. user_permission : SELECT → UPDATE / INSERT ----------
+    if (req.user && req.user.id) {
+      const permissions = {};
+      fields.forEach((f) => {
+        if (!permissions[f.field_group]) permissions[f.field_group] = {};
+        permissions[f.field_group][f.field_key] = !!f.is_selected;
+      });
+
+      const rolesJson   = JSON.stringify(req.body.allowedRoles   || []);
+      const zonesJson   = JSON.stringify(req.body.allowedZones   || []);
+      const regionsJson = JSON.stringify(req.body.allowedRegions || []);
+      const permsJson   = JSON.stringify(permissions);
+
+      const [existing] = await conn.query(
+        `SELECT id FROM user_permission
+          WHERE user_id = ? AND setup_config_id = ?
+          ORDER BY id DESC
+          LIMIT 1`,
+        [req.user.id, setupConfigId]
+      );
+
+      if (existing.length) {
+        // UPDATE existing row
+        await conn.query(
+          `UPDATE user_permission
+              SET allowed_roles   = ?,
+                  allowed_zones   = ?,
+                  allowed_regions = ?,
+                  permissions     = ?,
+                  updated_at      = CURRENT_TIMESTAMP
+            WHERE id = ?`,
+          [rolesJson, zonesJson, regionsJson, permsJson, existing[0].id]
+        );
+
+        // safety: remove stale duplicates for same (user, config)
+        await conn.query(
+          `DELETE FROM user_permission
+            WHERE user_id = ? AND setup_config_id = ? AND id <> ?`,
+          [req.user.id, setupConfigId, existing[0].id]
+        );
+      } else {
+        // INSERT new row
+        await conn.query(
+          `INSERT INTO user_permission
+             (user_id, setup_config_id, allowed_roles, allowed_zones,
+              allowed_regions, permissions)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            req.user.id,
+            setupConfigId,
+            rolesJson,
+            zonesJson,
+            regionsJson,
+            permsJson,
+          ]
+        );
+      }
+    }
+
+    await conn.commit();
+
+    res.json({
+      success: true,
+      message: 'Setup saved successfully',
+      configAction,
+      setupConfigId,
+      projectName: String(projectName).trim(),
+      fieldsSaved: rows.length,
+    });
+  } catch (err) {
+    await conn.rollback();
+    console.error('[setup.saveSetup]', err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    conn.release();
+  }
+};
