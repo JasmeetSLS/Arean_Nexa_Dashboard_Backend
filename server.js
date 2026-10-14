@@ -20,7 +20,7 @@ const chatRoutes       = require('./admin/chat/chat.routes');
 const requireAuth      = require('./middleware/auth');
 
 app.use('/api', authRoutes);
-app.use('/api', requireAuth, setupRoutes);
+app.use('/api', setupRoutes);
 app.use('/api', requireAuth, permissionRoutes);
 app.use('/api', requireAuth, chatRoutes);
 

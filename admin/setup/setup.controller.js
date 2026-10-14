@@ -2,7 +2,7 @@ const ExcelJS = require('exceljs');
 const pool    = require('../../config/db');
 
 // =====================================================================
-// Inlined time helpers
+// Time helpers
 // =====================================================================
 const hmsToSeconds = (hms) => {
   if (!hms || typeof hms !== 'string') return 0;
@@ -18,55 +18,110 @@ const secondsToHms = (secs) => {
 };
 
 // =====================================================================
-// GET /api/grid
+// GET /api/grid/:project_id
 // =====================================================================
-exports.getGrid = async (_req, res) => {
+exports.getGrid = async (req, res) => {
   try {
-    const [users] = await pool.query(`
+    const { project_id } = req.params;
+
+    let projectName = null;
+    if (project_id) {
+      const [[cfg]] = await pool.query(
+        `SELECT project_name FROM project_round_config WHERE id = ?`,
+        [project_id]
+      );
+      if (!cfg) {
+        return res.status(404).json({ success: false, error: 'Project not found' });
+      }
+      projectName = cfg.project_name;
+    }
+
+    const where  = [];
+    const params = [];
+    if (projectName) { where.push('ud.project_name = ?'); params.push(projectName); }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    // Participants + latest round's trainer (join via username)
+    const [users] = await pool.query(
+      `
       SELECT
         ud.mpin,
         ud.name,
         ud.role,
+        ud.project_name,
         t.id         AS trainer_id,
         t.name       AS trainer_name,
         t.photo_url  AS trainer_photo
       FROM participants ud
       LEFT JOIN participant_rounds pr
         ON pr.id = (
-          SELECT p2.id
-          FROM participant_rounds p2
+          SELECT p2.id FROM participant_rounds p2
           WHERE p2.mpin = ud.mpin
-          ORDER BY p2.id DESC
-          LIMIT 1
+          ORDER BY p2.id DESC LIMIT 1
         )
-      LEFT JOIN trainers t
-        ON t.name = pr.trainer_name
+      LEFT JOIN trainers t ON t.username = pr.trainer_id
+      ${whereSql}
       ORDER BY ud.mpin
-    `);
+      `,
+      params
+    );
 
-    const [rounds] = await pool.query(`
-      SELECT mpin, round_name, trainer_name, score
-      FROM participant_rounds
-      ORDER BY mpin, id
-    `);
+    // Rounds per participant — bring back the trainer display name via join
+    const [rounds] = await pool.query(
+      `
+      SELECT pr.mpin,
+             pr.round_name,
+             pr.trainer_id,
+             t.name AS trainer_name,
+             pr.score
+      FROM participant_rounds pr
+      JOIN participants ud ON ud.mpin = pr.mpin
+      LEFT JOIN trainers t ON t.username = pr.trainer_id
+      ${whereSql}
+      ORDER BY pr.mpin, pr.id
+      `,
+      params
+    );
 
-    const [results] = await pool.query(`
-      SELECT mpin, percentage, total_time, status, rounds_status
-      FROM user_result
-    `);
+    // user_result scoped to project
+    const [results] = await pool.query(
+      `
+      SELECT ur.mpin, ur.trainer_id, ur.percentage, ur.total_time,
+             ur.status, ur.rounds_status
+      FROM user_result ur
+      JOIN participants ud ON ud.mpin = ur.mpin
+      ${whereSql}
+      `,
+      params
+    );
 
-    const [trainerRows] = await pool.query(`
-      SELECT id, name, photo_url
-      FROM trainers
-      ORDER BY id
-    `);
+    const [trainerRows] = await pool.query(
+      `SELECT id, name, photo_url FROM trainers ORDER BY id`
+    );
+
+    const [configRows] = await pool.query(
+      `
+      SELECT project_name, total_rounds, total_score, passing_percentage
+      FROM project_round_config
+      ${projectName ? 'WHERE project_name = ?' : ''}
+      `,
+      projectName ? [projectName] : []
+    );
+    const configMap = {};
+    for (const c of configRows) {
+      configMap[c.project_name] = {
+        totalRounds:       c.total_rounds,
+        totalScore:        c.total_score,
+        passingPercentage: Number(c.passing_percentage),
+      };
+    }
 
     const roundsByUser = {};
     for (const r of rounds) {
-      if (!roundsByUser[r.mpin]) roundsByUser[r.mpin] = [];
-      roundsByUser[r.mpin].push({
+      (roundsByUser[r.mpin] ||= []).push({
         roundName:   r.round_name,
-        trainerName: r.trainer_name,
+        trainerId:   r.trainer_id,     // username
+        trainerName: r.trainer_name,   // display name from trainers
         score:       r.score,
       });
     }
@@ -78,31 +133,36 @@ exports.getGrid = async (_req, res) => {
       const assigned = users
         .filter((u) => u.trainer_id === t.id)
         .map((u) => {
-          const ur = resultByUser[u.mpin] || {};
+          const ur  = resultByUser[u.mpin] || {};
+          const cfg = configMap[u.project_name] || {
+            totalRounds: 5, totalScore: 100, passingPercentage: 80,
+          };
           return {
-            mpin:         u.mpin,
-            name:         u.name,
-            role:         u.role,
-            percentage:   ur.percentage    ?? 0,
-            totalTime:    ur.total_time    ?? '00:00:00',
-            status:       ur.status        ?? 'Fail',
-            roundsStatus: ur.rounds_status ?? 'In Progress',
-            rounds:       roundsByUser[u.mpin] || [],
+            mpin:              u.mpin,
+            name:              u.name,
+            role:              u.role,
+            projectName:       u.project_name,
+            totalRounds:       cfg.totalRounds,
+            totalScore:        cfg.totalScore,
+            passingPercentage: cfg.passingPercentage,
+            percentage:        ur.percentage    ?? 0,
+            totalTime:         ur.total_time    ?? '00:00:00',
+            status:            ur.status        ?? 'Fail',
+            roundsStatus:      ur.rounds_status ?? 'In Progress',
+            rounds:            roundsByUser[u.mpin] || [],
           };
         });
 
-      const totalAssigned = assigned.length;
-      const passCount = assigned.filter((p) => p.status === 'Pass').length;
-      const passPercentage =
-        totalAssigned > 0
-          ? Number(((passCount / totalAssigned) * 100).toFixed(2))
-          : 0;
+      const totalAssigned  = assigned.length;
+      const passCount      = assigned.filter((p) => p.status === 'Pass').length;
+      const passPercentage = totalAssigned > 0
+        ? Number(((passCount / totalAssigned) * 100).toFixed(2))
+        : 0;
 
-      const totalSecs = assigned.reduce((sum, p) => sum + hmsToSeconds(p.totalTime), 0);
-      const avgTime =
-        totalAssigned > 0
-          ? secondsToHms(Math.round(totalSecs / totalAssigned))
-          : '00:00:00';
+      const totalSecs = assigned.reduce((s, p) => s + hmsToSeconds(p.totalTime), 0);
+      const avgTime   = totalAssigned > 0
+        ? secondsToHms(Math.round(totalSecs / totalAssigned))
+        : '00:00:00';
 
       return {
         trainer: {
@@ -120,6 +180,8 @@ exports.getGrid = async (_req, res) => {
     res.json({
       success: true,
       generatedAt: new Date().toISOString(),
+      projectId:   project_id || null,
+      projectName,
       totalTrainers: trainers.length,
       trainers,
     });
@@ -130,30 +192,76 @@ exports.getGrid = async (_req, res) => {
 };
 
 // =====================================================================
-// GET /api/dashboard
+// GET /api/dashboard/:project_id
 // =====================================================================
-exports.getDashboard = async (_req, res) => {
+exports.getDashboard = async (req, res) => {
   try {
-    const [users] = await pool.query(`
-      SELECT mpin, name, region, zone, round_start_time
-      FROM participants
-    `);
+    const { project_id } = req.params;
 
-    const [rounds] = await pool.query(`
-      SELECT mpin, trainer_name, round_name, score, end_time
-      FROM participant_rounds
-    `);
+    let projectName = null;
+    if (project_id) {
+      const [[cfg]] = await pool.query(
+        `SELECT project_name FROM project_round_config WHERE id = ?`,
+        [project_id]
+      );
+      if (!cfg) {
+        return res.status(404).json({ success: false, error: 'Project not found' });
+      }
+      projectName = cfg.project_name;
+    }
 
-    const [results] = await pool.query(`
-      SELECT mpin, percentage, total_time, status, rounds_status
-      FROM user_result
-    `);
+    const where  = [];
+    const params = [];
+    if (projectName) { where.push('p.project_name = ?'); params.push(projectName); }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-    const [trainerRows] = await pool.query(`
-      SELECT id, name, photo_url
-      FROM trainers
-      ORDER BY id
-    `);
+    const [users] = await pool.query(
+      `SELECT p.mpin, p.name, p.region, p.zone, p.project_name
+         FROM participants p ${whereSql}`,
+      params
+    );
+
+    // Rounds — bring trainer display name via join
+    const [rounds] = await pool.query(
+      `SELECT pr.mpin,
+              pr.trainer_id,
+              t.name AS trainer_name,
+              pr.round_name,
+              pr.score, pr.start_time, pr.end_time
+         FROM participant_rounds pr
+         JOIN participants p ON p.mpin = pr.mpin
+         LEFT JOIN trainers t ON t.username = pr.trainer_id
+         ${whereSql}`,
+      params
+    );
+
+    const [results] = await pool.query(
+      `SELECT ur.mpin, ur.trainer_id, ur.percentage,
+              ur.total_time, ur.status, ur.rounds_status
+         FROM user_result ur
+         JOIN participants p ON p.mpin = ur.mpin
+         ${whereSql}`,
+      params
+    );
+
+    const [trainerRows] = await pool.query(
+      `SELECT id, name, username, photo_url FROM trainers ORDER BY id`
+    );
+
+    const [configRows] = await pool.query(
+      `SELECT project_name, total_rounds, total_score, passing_percentage
+         FROM project_round_config
+         ${projectName ? 'WHERE project_name = ?' : ''}`,
+      projectName ? [projectName] : []
+    );
+    const configMap = {};
+    for (const c of configRows) {
+      configMap[c.project_name] = {
+        totalRounds:       c.total_rounds,
+        totalScore:        c.total_score,
+        passingPercentage: Number(c.passing_percentage),
+      };
+    }
 
     const resultByUser = {};
     for (const r of results) resultByUser[r.mpin] = r;
@@ -163,33 +271,34 @@ exports.getDashboard = async (_req, res) => {
 
     // ---- todayLive ----
     const today = new Date();
-    const yyyy = today.getFullYear();
-    const mm   = String(today.getMonth() + 1).padStart(2, '0');
-    const dd   = String(today.getDate()).padStart(2, '0');
-    const todayDate = `${yyyy}-${mm}-${dd}`;
+    const todayDate = [
+      today.getFullYear(),
+      String(today.getMonth() + 1).padStart(2, '0'),
+      String(today.getDate()).padStart(2, '0'),
+    ].join('-');
 
-    const todayUsers = users.filter(
-      (u) => u.round_start_time && String(u.round_start_time).slice(0, 10) === todayDate
+    const todayMpins = new Set(
+      rounds
+        .filter(r => r.start_time && String(r.start_time).slice(0, 10) === todayDate)
+        .map(r => r.mpin)
     );
-    const todayMpins = new Set(todayUsers.map((u) => u.mpin));
-    const todayResults = results.filter((r) => todayMpins.has(r.mpin));
+    const todayResults = results.filter(r => todayMpins.has(r.mpin));
 
-    const tPass = todayResults.filter((r) => r.status === 'Pass').length;
-    const tFail = todayResults.filter((r) => r.status === 'Fail').length;
-
+    const tPass = todayResults.filter(r => r.status === 'Pass').length;
+    const tFail = todayResults.filter(r => r.status === 'Fail').length;
     const tPassRate = (tPass + tFail) > 0
       ? Number(((tPass / (tPass + tFail)) * 100).toFixed(2))
       : 0;
 
-    const tSecs = todayResults.reduce((sum, r) => sum + hmsToSeconds(r.total_time), 0);
+    const tSecs    = todayResults.reduce((s, r) => s + hmsToSeconds(r.total_time), 0);
     const tAvgTime = todayResults.length > 0
       ? secondsToHms(Math.round(tSecs / todayResults.length))
       : '00:00:00';
 
-    const todayCompleted = todayResults.filter((r) => r.rounds_status === 'Completed').length;
+    const todayCompleted  = todayResults.filter(r => r.rounds_status === 'Completed').length;
     const todayInProgress = todayMpins.size - todayCompleted;
 
-    const activeTrainers = new Set(rounds.map((r) => r.trainer_name).filter(Boolean));
+    const activeTrainers = new Set(rounds.map(r => r.trainer_id).filter(Boolean));
 
     const todayLive = {
       date:           todayDate,
@@ -241,35 +350,26 @@ exports.getDashboard = async (_req, res) => {
     // ---- trainerSummary ----
     const trainerSummary = trainerRows.map((t) => {
       const assignedUsers = users.filter((u) => {
-        const userRounds = rounds.filter((r) => r.mpin === u.mpin);
-        if (userRounds.length === 0) return false;
-        return userRounds[userRounds.length - 1].trainer_name === t.name;
+        const userRounds = rounds.filter(r => r.mpin === u.mpin);
+        if (!userRounds.length) return false;
+        return userRounds[userRounds.length - 1].trainer_id === t.username;
       });
 
       const assigned = assignedUsers.length;
-      const pass = assignedUsers.filter((u) => {
-        const ur = resultByUser[u.mpin]; return ur && ur.status === 'Pass';
-      }).length;
-      const fail = assignedUsers.filter((u) => {
-        const ur = resultByUser[u.mpin]; return ur && ur.status === 'Fail';
-      }).length;
+      const pass = assignedUsers.filter(u => resultByUser[u.mpin]?.status === 'Pass').length;
+      const fail = assignedUsers.filter(u => resultByUser[u.mpin]?.status === 'Fail').length;
 
-      const secs = assignedUsers.reduce((sum, u) => {
+      const secs = assignedUsers.reduce((s, u) => {
         const ur = resultByUser[u.mpin];
-        return sum + (ur ? hmsToSeconds(ur.total_time) : 0);
+        return s + (ur ? hmsToSeconds(ur.total_time) : 0);
       }, 0);
 
       const roundJourney = {};
-      rounds.forEach((r) => {
-        if (r.trainer_name !== t.name) return;
+      rounds.forEach(r => {
+        if (r.trainer_id !== t.username) return;
         if (r.score == null || r.end_time == null) return;
         const key = r.round_name.toLowerCase().replace(/\s+/g, '');
         roundJourney[key] = (roundJourney[key] || 0) + 1;
-      });
-
-      const roundJourneyStr = {};
-      Object.keys(roundJourney).forEach((k) => {
-        roundJourneyStr[k] = String(roundJourney[k]);
       });
 
       return {
@@ -283,25 +383,51 @@ exports.getDashboard = async (_req, res) => {
         avgTime:  assigned > 0
           ? secondsToHms(Math.round(secs / assigned))
           : '00:00:00',
-        roundJourney: roundJourneyStr,
+        roundJourney: Object.fromEntries(
+          Object.entries(roundJourney).map(([k, v]) => [k, String(v)])
+        ),
       };
     });
 
+    // ---- projectSummary ----
+    const projectBuckets = {};
+    for (const u of users) {
+      const key = u.project_name || '—';
+      if (!projectBuckets[key]) {
+        const cfg = configMap[key] || {
+          totalRounds: 5, totalScore: 100, passingPercentage: 80,
+        };
+        projectBuckets[key] = {
+          projectName:       key,
+          totalRounds:       cfg.totalRounds,
+          totalScore:        cfg.totalScore,
+          passingPercentage: cfg.passingPercentage,
+          totalUsers: 0, completed: 0, inProgress: 0,
+        };
+      }
+      projectBuckets[key].totalUsers += 1;
+      const ur = resultByUser[u.mpin];
+      if (ur?.rounds_status === 'Completed') projectBuckets[key].completed += 1;
+      else                                   projectBuckets[key].inProgress += 1;
+    }
+    const projectSummary = Object.values(projectBuckets)
+      .sort((a, b) => a.projectName.localeCompare(b.projectName));
+
     // ---- contestTotals ----
     const totalScheduled = users.length;
-    const totalAttempted = rounds.filter((r) => r.score != null && r.end_time != null).length;
-    const overallPass = results.filter((r) => r.status === 'Pass').length;
-    const overallFail = results.filter((r) => r.status === 'Fail').length;
+    const totalAttempted = rounds.filter(r => r.score != null && r.end_time != null).length;
+    const overallPass = results.filter(r => r.status === 'Pass').length;
+    const overallFail = results.filter(r => r.status === 'Fail').length;
     const overallPassRate = (overallPass + overallFail) > 0
       ? Number(((overallPass / (overallPass + overallFail)) * 100).toFixed(2))
       : 0;
-    const allSecs = results.reduce((sum, r) => sum + hmsToSeconds(r.total_time), 0);
+    const allSecs = results.reduce((s, r) => s + hmsToSeconds(r.total_time), 0);
     const overallAvg = results.length > 0
       ? secondsToHms(Math.round(allSecs / results.length))
       : '00:00:00';
 
-    const totalCompleted = results.filter((r) => r.rounds_status === 'Completed').length;
-    const totalInProgress = results.filter((r) => r.rounds_status !== 'Completed').length;
+    const totalCompleted  = results.filter(r => r.rounds_status === 'Completed').length;
+    const totalInProgress = results.filter(r => r.rounds_status !== 'Completed').length;
 
     const contestTotals = {
       totalScheduled,
@@ -315,9 +441,12 @@ exports.getDashboard = async (_req, res) => {
     res.json({
       success: true,
       generatedAt: new Date().toISOString(),
+      projectId:   project_id || null,
+      projectName,
       todayLive,
       regionSummary,
       trainerSummary,
+      projectSummary,
       contestTotals,
     });
   } catch (err) {
@@ -331,16 +460,24 @@ exports.getDashboard = async (_req, res) => {
 // =====================================================================
 exports.getFilters = async (_req, res) => {
   try {
+    const [projectRows] = await pool.query(`
+      SELECT id, project_name, total_rounds, total_score, passing_percentage
+      FROM project_round_config
+      WHERE status = 'active'
+      ORDER BY project_name
+    `);
+
     const [dateRows] = await pool.query(`
-      SELECT DISTINCT DATE(round_start_time) AS d
-      FROM participants WHERE round_start_time IS NOT NULL
+      SELECT DISTINCT DATE(pr.start_time) AS d
+      FROM participant_rounds pr
+      WHERE pr.start_time IS NOT NULL
       ORDER BY d DESC
     `);
-    const [zoneRows]       = await pool.query(`SELECT DISTINCT zone FROM participants WHERE zone IS NOT NULL AND zone <> '' ORDER BY zone`);
-    const [regionRows]     = await pool.query(`SELECT DISTINCT region FROM participants WHERE region IS NOT NULL AND region <> '' ORDER BY region`);
+
+    const [zoneRows]       = await pool.query(`SELECT DISTINCT zone       FROM participants WHERE zone       IS NOT NULL AND zone       <> '' ORDER BY zone`);
+    const [regionRows]     = await pool.query(`SELECT DISTINCT region     FROM participants WHERE region     IS NOT NULL AND region     <> '' ORDER BY region`);
     const [trainerRows]    = await pool.query(`SELECT id, name, photo_url FROM trainers ORDER BY name`);
-    const [roleRows]       = await pool.query(`SELECT DISTINCT role FROM participants WHERE role IS NOT NULL AND role <> '' ORDER BY role`);
-    const [agencyRows]     = await pool.query(`SELECT DISTINCT agency FROM participants WHERE agency IS NOT NULL AND agency <> '' ORDER BY agency`);
+    const [roleRows]       = await pool.query(`SELECT DISTINCT role       FROM participants WHERE role       IS NOT NULL AND role       <> '' ORDER BY role`);
     const [dealerNameRows] = await pool.query(`SELECT DISTINCT dealer_name FROM participants WHERE dealer_name IS NOT NULL AND dealer_name <> '' ORDER BY dealer_name`);
     const [dealerCodeRows] = await pool.query(`SELECT DISTINCT dealer_code FROM participants WHERE dealer_code IS NOT NULL AND dealer_code <> '' ORDER BY dealer_code`);
 
@@ -351,12 +488,18 @@ exports.getFilters = async (_req, res) => {
     res.json({
       success: true,
       generatedAt: new Date().toISOString(),
+      projects: projectRows.map(r => ({
+        id:                r.id,
+        name:              r.project_name,
+        totalRounds:       r.total_rounds,
+        totalScore:        r.total_score,
+        passingPercentage: Number(r.passing_percentage),
+      })),
       dates,
       zones:       zoneRows.map(r => r.zone),
       regions:     regionRows.map(r => r.region),
       trainers:    trainerRows.map(t => ({ id: t.id, name: t.name, photoUrl: t.photo_url })),
       roles:       roleRows.map(r => r.role),
-      agencies:    agencyRows.map(r => r.agency),
       dealerNames: dealerNameRows.map(r => r.dealer_name),
       dealerCodes: dealerCodeRows.map(r => r.dealer_code),
     });
@@ -367,38 +510,56 @@ exports.getFilters = async (_req, res) => {
 };
 
 // =====================================================================
-// GET /api/export/users
+// GET /api/export/users/:project_id
 // =====================================================================
 exports.exportUsers = async (req, res) => {
   try {
+    const { project_id } = req.params;
     const {
       region, zone, role, status,
-      agency, dealerName, dealerCode, trainer,
+      dealerName, dealerCode, trainer,
     } = req.query;
 
-    const where = [];
+    let projectName = null;
+    if (project_id) {
+      const [[cfg]] = await pool.query(
+        `SELECT project_name FROM project_round_config WHERE id = ?`,
+        [project_id]
+      );
+      if (!cfg) {
+        return res.status(404).json({ success: false, error: 'Project not found' });
+      }
+      projectName = cfg.project_name;
+    }
+
+    const where  = [];
     const params = [];
-    if (region)     { where.push('ud.region = ?');      params.push(region); }
-    if (zone)       { where.push('ud.zone = ?');        params.push(zone); }
-    if (role)       { where.push('ud.role = ?');        params.push(role); }
-    if (status)     { where.push('ur.status = ?');      params.push(status); }
-    if (agency)     { where.push('ud.agency = ?');      params.push(agency); }
-    if (dealerName) { where.push('ud.dealer_name = ?'); params.push(dealerName); }
-    if (dealerCode) { where.push('ud.dealer_code = ?'); params.push(dealerCode); }
-    if (trainer)    { where.push('ur.trainer = ?');     params.push(trainer); }
+    if (projectName) { where.push('ud.project_name = ?'); params.push(projectName); }
+    if (region)      { where.push('ud.region = ?');       params.push(region); }
+    if (zone)        { where.push('ud.zone = ?');         params.push(zone); }
+    if (role)        { where.push('ud.role = ?');         params.push(role); }
+    if (status)      { where.push('ur.status = ?');       params.push(status); }
+    if (dealerName)  { where.push('ud.dealer_name = ?');  params.push(dealerName); }
+    if (dealerCode)  { where.push('ud.dealer_code = ?');  params.push(dealerCode); }
+    // Filter by trainer NAME → match against trainers.username via ur.trainer_id
+    if (trainer)     { where.push('ur.trainer_id = ?');   params.push(trainer); }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
     const [rows] = await pool.query(
       `
       SELECT
-        ud.mpin, ud.name, ud.role, ud.agency, ud.region, ud.zone,
+        ud.project_name,
+        ud.mpin, ud.name, ud.role, ud.region, ud.zone,
         ud.city, ud.dealer_name, ud.dealer_code,
-        ur.trainer, ur.percentage, ur.status AS pass_fail,
+        ur.trainer_id,
+        t.name AS trainer_name,
+        ur.percentage, ur.status AS pass_fail,
         ur.rounds_status, ur.total_time, ur.updated_at
       FROM participants ud
       LEFT JOIN user_result ur ON ur.mpin = ud.mpin
+      LEFT JOIN trainers t ON t.username = ur.trainer_id
       ${whereSql}
-      ORDER BY ud.region, ud.zone, ud.name
+      ORDER BY ud.project_name, ud.region, ud.zone, ud.name
       `,
       params
     );
@@ -412,16 +573,17 @@ exports.exportUsers = async (req, res) => {
     });
 
     ws.columns = [
+      { header: 'Project',       key: 'project_name',  width: 16 },
       { header: 'MPIN',          key: 'mpin',          width: 16 },
       { header: 'Name',          key: 'name',          width: 24 },
       { header: 'Role',          key: 'role',          width: 16 },
-      { header: 'Agency',        key: 'agency',        width: 20 },
       { header: 'Region',        key: 'region',        width: 14 },
       { header: 'Zone',          key: 'zone',          width: 12 },
       { header: 'City',          key: 'city',          width: 16 },
       { header: 'Dealer Name',   key: 'dealer_name',   width: 26 },
       { header: 'Dealer Code',   key: 'dealer_code',   width: 14 },
-      { header: 'Trainer',       key: 'trainer',       width: 22 },
+      { header: 'Trainer ID',    key: 'trainer_id',    width: 16 },  // username
+      { header: 'Trainer',       key: 'trainer_name',  width: 22 },  // display name
       { header: 'Percentage',    key: 'percentage',    width: 12 },
       { header: 'Status',        key: 'pass_fail',     width: 10 },
       { header: 'Rounds Status', key: 'rounds_status', width: 14 },
@@ -445,20 +607,21 @@ exports.exportUsers = async (req, res) => {
 
     rows.forEach((r) => {
       const row = ws.addRow({
+        project_name:  r.project_name   || '—',
         mpin:          r.mpin,
         name:          r.name,
         role:          r.role,
-        agency:        r.agency,
         region:        r.region,
         zone:          r.zone,
         city:          r.city,
         dealer_name:   r.dealer_name,
         dealer_code:   r.dealer_code,
-        trainer:       r.trainer        || '—',
+        trainer_id:    r.trainer_id    || '—',
+        trainer_name:  r.trainer_name  || '—',
         percentage:    r.percentage != null ? Number(r.percentage) : null,
-        pass_fail:     r.pass_fail      || '—',
-        rounds_status: r.rounds_status  || '—',
-        total_time:    r.total_time     || '—',
+        pass_fail:     r.pass_fail     || '—',
+        rounds_status: r.rounds_status || '—',
+        total_time:    r.total_time    || '—',
         updated_at:    r.updated_at ? new Date(r.updated_at) : null,
       });
 

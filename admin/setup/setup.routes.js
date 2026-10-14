@@ -7,9 +7,9 @@ router.get ('/setup', setupController.getSetup);
 router.post('/setup', setupController.saveSetup);
 
 // ---- Dashboard / Grid / Filters ----
-router.get('/grid',         setupController.getGrid);
-router.get('/dashboard',    setupController.getDashboard);
+router.get('/grid/:project_id',         setupController.getGrid);
+router.get('/dashboard/:project_id',    setupController.getDashboard);
+router.get('/export/users/:project_id', setupController.exportUsers);
 router.get('/filters',      setupController.getFilters);
-router.get('/export/users', setupController.exportUsers);
 
 module.exports = router;
