@@ -17,12 +17,14 @@ const authRoutes       = require('./auth/auth.routes');
 const setupRoutes      = require('./admin/setup/setup.routes');
 const permissionRoutes = require('./admin/permission/permission.routes');
 const chatRoutes       = require('./admin/chat/chat.routes');
+const webhookRoutes    = require('./admin/webhook/webhook.routes');
 const requireAuth      = require('./middleware/auth');
 
 app.use('/api', authRoutes);
 app.use('/api', setupRoutes);
 app.use('/api', requireAuth, permissionRoutes);
 app.use('/api', requireAuth, chatRoutes);
+app.use('/api', requireAuth,webhookRoutes );
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
