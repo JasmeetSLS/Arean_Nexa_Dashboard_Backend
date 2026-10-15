@@ -221,7 +221,6 @@ exports.getDashboard = async (req, res) => {
       params
     );
 
-    // Rounds — bring trainer display name via join
     const [rounds] = await pool.query(
       `SELECT pr.mpin,
               pr.trainer_id,
@@ -247,21 +246,6 @@ exports.getDashboard = async (req, res) => {
     const [trainerRows] = await pool.query(
       `SELECT id, name, username, photo_url FROM trainers ORDER BY id`
     );
-
-    const [configRows] = await pool.query(
-      `SELECT project_name, total_rounds, total_score, passing_percentage
-         FROM project_round_config
-         ${projectName ? 'WHERE project_name = ?' : ''}`,
-      projectName ? [projectName] : []
-    );
-    const configMap = {};
-    for (const c of configRows) {
-      configMap[c.project_name] = {
-        totalRounds:       c.total_rounds,
-        totalScore:        c.total_score,
-        passingPercentage: Number(c.passing_percentage),
-      };
-    }
 
     const resultByUser = {};
     for (const r of results) resultByUser[r.mpin] = r;
@@ -389,30 +373,6 @@ exports.getDashboard = async (req, res) => {
       };
     });
 
-    // ---- projectSummary ----
-    const projectBuckets = {};
-    for (const u of users) {
-      const key = u.project_name || '—';
-      if (!projectBuckets[key]) {
-        const cfg = configMap[key] || {
-          totalRounds: 5, totalScore: 100, passingPercentage: 80,
-        };
-        projectBuckets[key] = {
-          projectName:       key,
-          totalRounds:       cfg.totalRounds,
-          totalScore:        cfg.totalScore,
-          passingPercentage: cfg.passingPercentage,
-          totalUsers: 0, completed: 0, inProgress: 0,
-        };
-      }
-      projectBuckets[key].totalUsers += 1;
-      const ur = resultByUser[u.mpin];
-      if (ur?.rounds_status === 'Completed') projectBuckets[key].completed += 1;
-      else                                   projectBuckets[key].inProgress += 1;
-    }
-    const projectSummary = Object.values(projectBuckets)
-      .sort((a, b) => a.projectName.localeCompare(b.projectName));
-
     // ---- contestTotals ----
     const totalScheduled = users.length;
     const totalAttempted = rounds.filter(r => r.score != null && r.end_time != null).length;
@@ -446,7 +406,6 @@ exports.getDashboard = async (req, res) => {
       todayLive,
       regionSummary,
       trainerSummary,
-      projectSummary,
       contestTotals,
     });
   } catch (err) {
@@ -454,7 +413,6 @@ exports.getDashboard = async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 };
-
 // =====================================================================
 // GET /api/filters
 // =====================================================================
