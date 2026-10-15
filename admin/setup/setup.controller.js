@@ -215,12 +215,14 @@ exports.getDashboard = async (req, res) => {
     if (projectName) { where.push('p.project_name = ?'); params.push(projectName); }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
+    // ---- users ----
     const [users] = await pool.query(
-      `SELECT p.mpin, p.name, p.region, p.zone, p.project_name
+      `SELECT p.mpin, p.name, p.region, p.zone, p.project_name, p.date
          FROM participants p ${whereSql}`,
       params
     );
 
+    // ---- rounds ----
     const [rounds] = await pool.query(
       `SELECT pr.mpin,
               pr.trainer_id,
@@ -234,9 +236,11 @@ exports.getDashboard = async (req, res) => {
       params
     );
 
+    // ---- results (now includes delay_status) ----
     const [results] = await pool.query(
       `SELECT ur.mpin, ur.trainer_id, ur.percentage,
-              ur.total_time, ur.status, ur.rounds_status
+              ur.total_time, ur.status, ur.rounds_status,
+              ur.delay_status
          FROM user_result ur
          JOIN participants p ON p.mpin = ur.mpin
          ${whereSql}`,
@@ -261,11 +265,13 @@ exports.getDashboard = async (req, res) => {
       String(today.getDate()).padStart(2, '0'),
     ].join('-');
 
+    // scheduled → participants whose `date` = today (for selected project)
     const todayMpins = new Set(
-      rounds
-        .filter(r => r.start_time && String(r.start_time).slice(0, 10) === todayDate)
-        .map(r => r.mpin)
+      users
+        .filter(u => u.date && String(u.date).slice(0, 10) === todayDate)
+        .map(u => u.mpin)
     );
+
     const todayResults = results.filter(r => todayMpins.has(r.mpin));
 
     const tPass = todayResults.filter(r => r.status === 'Pass').length;
@@ -281,6 +287,7 @@ exports.getDashboard = async (req, res) => {
 
     const todayCompleted  = todayResults.filter(r => r.rounds_status === 'Completed').length;
     const todayInProgress = todayMpins.size - todayCompleted;
+    const todayDelayed    = todayResults.filter(r => r.delay_status === 'Delay').length;
 
     const activeTrainers = new Set(rounds.map(r => r.trainer_id).filter(Boolean));
 
@@ -289,6 +296,7 @@ exports.getDashboard = async (req, res) => {
       scheduled:      todayMpins.size,
       completed:      todayCompleted,
       inProgress:     todayInProgress,
+      delayed:        todayDelayed,
       passRate:       tPassRate,
       avgTime:        tAvgTime,
       activeTrainers: activeTrainers.size,
@@ -388,12 +396,14 @@ exports.getDashboard = async (req, res) => {
 
     const totalCompleted  = results.filter(r => r.rounds_status === 'Completed').length;
     const totalInProgress = results.filter(r => r.rounds_status !== 'Completed').length;
+    const totalDelayed    = results.filter(r => r.delay_status === 'Delay').length;
 
     const contestTotals = {
       totalScheduled,
       totalAttempted,
       completed:  totalCompleted,
       inProgress: totalInProgress,
+      delayed:    totalDelayed,
       passRate:   overallPassRate,
       avgTime:    overallAvg,
     };
