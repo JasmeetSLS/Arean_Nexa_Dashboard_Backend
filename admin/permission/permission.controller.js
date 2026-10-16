@@ -23,6 +23,7 @@ exports.listAdmins = async (_req, res) => {
 // GET /api/permissions/options?userId=1
 //   → sections + fields from setup_field_master (is_selected = 1)
 //   → roles / zones / regions from participants
+//   → projects from project_round_config
 //   → existing user_permission row for this user
 // =====================================================================
 exports.getOptions = async (req, res) => {
@@ -36,12 +37,13 @@ exports.getOptions = async (req, res) => {
     if (!cfg.length) {
       return res.json({
         success: true,
-        sections: [], roles: [], zones: [], regions: [], existing: null,
+        sections: [], roles: [], zones: [], regions: [],
+        projects: [], existing: null,
       });
     }
     const setupConfigId = cfg[0].id;
 
-    // --- 2. Selected fields ---
+    // --- 2. Selected fields from setup_field_master ---
     const [rows] = await pool.query(
       `SELECT field_group, field_key, field_order, sort_order
          FROM setup_field_master
@@ -68,16 +70,29 @@ exports.getOptions = async (req, res) => {
       .sort((a, b) => a.sort_order - b.sort_order);
 
     // --- 3. Roles / Zones / Regions from participants ---
-    const [pRows] = await pool.query(`SELECT role, zone, region FROM participants`);
+    const [pRows] = await pool.query(
+      `SELECT role, zone, region FROM participants`
+    );
     const roles   = Array.from(new Set(pRows.map((p) => p.role  ).filter(Boolean))).sort();
     const zones   = Array.from(new Set(pRows.map((p) => p.zone  ).filter(Boolean))).sort();
     const regions = Array.from(new Set(pRows.map((p) => p.region).filter(Boolean))).sort();
 
-    // --- 4. Existing permissions for this user ---
+    // --- 4. Projects from project_round_config ---
+    const [projRows] = await pool.query(
+      `SELECT project_name
+         FROM project_round_config
+        WHERE status = 'active'
+        ORDER BY project_name`
+    );
+    const projects = projRows.map((p) => p.project_name);
+
+    // --- 5. Existing permissions for this user ---
     let existing = null;
     if (req.query.userId) {
       const [up] = await pool.query(
-        `SELECT allowed_roles, allowed_zones, allowed_regions, permissions
+        `SELECT allowed_roles, allowed_zones, allowed_regions,
+                allowed_projects,
+                permissions
            FROM user_permission
           WHERE user_id = ? AND setup_config_id = ?
           ORDER BY id DESC
@@ -86,10 +101,11 @@ exports.getOptions = async (req, res) => {
       );
       if (up.length) {
         existing = {
-          allowed_roles:   up[0].allowed_roles,
-          allowed_zones:   up[0].allowed_zones,
-          allowed_regions: up[0].allowed_regions,
-          permissions:     up[0].permissions,
+          allowed_roles:    up[0].allowed_roles,
+          allowed_zones:    up[0].allowed_zones,
+          allowed_regions:  up[0].allowed_regions,
+          allowed_projects: up[0].allowed_projects,
+          permissions:      up[0].permissions,
         };
       }
     }
@@ -98,7 +114,7 @@ exports.getOptions = async (req, res) => {
       success: true,
       setupConfigId,
       sections,
-      roles, zones, regions,
+      roles, zones, regions, projects,
       existing,
     });
   } catch (err) {
@@ -111,7 +127,7 @@ exports.getOptions = async (req, res) => {
 // POST /api/permissions
 // body: {
 //   userId,
-//   allowedRoles: [..], allowedZones: [..], allowedRegions: [..],
+//   allowedRoles, allowedZones, allowedRegions, allowedProjects,
 //   permissions: { <field_group>: { <field_key>: bool } }
 // }
 // → SELECT then UPDATE or INSERT
@@ -121,10 +137,11 @@ exports.savePermissions = async (req, res) => {
   try {
     const {
       userId,
-      allowedRoles   = [],
-      allowedZones   = [],
-      allowedRegions = [],
-      permissions    = {},
+      allowedRoles    = [],
+      allowedZones    = [],
+      allowedRegions  = [],
+      allowedProjects = [],
+      permissions     = {},
     } = req.body;
 
     if (!userId) {
@@ -143,10 +160,11 @@ exports.savePermissions = async (req, res) => {
     const setupConfigId = cfg[0].id;
 
     // -------- serialize payload --------
-    const rolesJson   = JSON.stringify(allowedRoles);
-    const zonesJson   = JSON.stringify(allowedZones);
-    const regionsJson = JSON.stringify(allowedRegions);
-    const permsJson   = JSON.stringify(permissions);
+    const rolesJson    = JSON.stringify(allowedRoles);
+    const zonesJson    = JSON.stringify(allowedZones);
+    const regionsJson  = JSON.stringify(allowedRegions);
+    const projectsJson = JSON.stringify(allowedProjects);
+    const permsJson    = JSON.stringify(permissions);
 
     await conn.beginTransaction();
 
@@ -165,13 +183,18 @@ exports.savePermissions = async (req, res) => {
       // ---------- UPDATE ----------
       await conn.query(
         `UPDATE user_permission
-            SET allowed_roles   = ?,
-                allowed_zones   = ?,
-                allowed_regions = ?,
-                permissions     = ?,
-                updated_at      = CURRENT_TIMESTAMP
+            SET allowed_roles    = ?,
+                allowed_zones    = ?,
+                allowed_regions  = ?,
+                allowed_projects = ?,
+                permissions      = ?,
+                updated_at       = CURRENT_TIMESTAMP
           WHERE id = ?`,
-        [rolesJson, zonesJson, regionsJson, permsJson, existing[0].id]
+        [
+          rolesJson, zonesJson, regionsJson,
+          projectsJson, permsJson,
+          existing[0].id,
+        ]
       );
 
       // safety cleanup if there are stray duplicates
@@ -186,10 +209,16 @@ exports.savePermissions = async (req, res) => {
       // ---------- INSERT ----------
       await conn.query(
         `INSERT INTO user_permission
-           (user_id, setup_config_id, allowed_roles, allowed_zones,
-            allowed_regions, permissions)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [userId, setupConfigId, rolesJson, zonesJson, regionsJson, permsJson]
+           (user_id, setup_config_id,
+            allowed_roles, allowed_zones, allowed_regions,
+            allowed_projects,
+            permissions)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          userId, setupConfigId,
+          rolesJson, zonesJson, regionsJson,
+          projectsJson, permsJson,
+        ]
       );
 
       action = 'inserted';

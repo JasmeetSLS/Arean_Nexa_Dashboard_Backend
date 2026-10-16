@@ -1,482 +1,332 @@
 const ExcelJS = require('exceljs');
-const pool    = require('../../config/db');
+const pool = require('../../config/db');
 
-// =====================================================================
-// Time helpers
-// =====================================================================
-const hmsToSeconds = (hms) => {
-  if (!hms || typeof hms !== 'string') return 0;
-  const [h = '0', m = '0', s = '0'] = hms.split(':');
-  return Number(h) * 3600 + Number(m) * 60 + Number(s);
-};
-
-const secondsToHms = (secs) => {
-  const h = Math.floor(secs / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  const s = secs % 60;
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-};
-
-// =====================================================================
-// GET /api/grid/:project_id
-// =====================================================================
-exports.getGrid = async (req, res) => {
-  try {
-    const { project_id } = req.params;
-
-    let projectName = null;
-    if (project_id) {
-      const [[cfg]] = await pool.query(
-        `SELECT project_name FROM project_round_config WHERE id = ?`,
-        [project_id]
-      );
-      if (!cfg) {
-        return res.status(404).json({ success: false, error: 'Project not found' });
-      }
-      projectName = cfg.project_name;
-    }
-
-    const where  = [];
-    const params = [];
-    if (projectName) { where.push('ud.project_name = ?'); params.push(projectName); }
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-
-    // Participants + latest round's trainer (join via username)
-    const [users] = await pool.query(
-      `
-      SELECT
-        ud.mpin,
-        ud.name,
-        ud.role,
-        ud.project_name,
-        t.id         AS trainer_id,
-        t.name       AS trainer_name,
-        t.photo_url  AS trainer_photo
-      FROM participants ud
-      LEFT JOIN participant_rounds pr
-        ON pr.id = (
-          SELECT p2.id FROM participant_rounds p2
-          WHERE p2.mpin = ud.mpin
-          ORDER BY p2.id DESC LIMIT 1
-        )
-      LEFT JOIN trainers t ON t.username = pr.trainer_id
-      ${whereSql}
-      ORDER BY ud.mpin
-      `,
-      params
-    );
-
-    // Rounds per participant — bring back the trainer display name via join
-    const [rounds] = await pool.query(
-      `
-      SELECT pr.mpin,
-             pr.round_name,
-             pr.trainer_id,
-             t.name AS trainer_name,
-             pr.score
-      FROM participant_rounds pr
-      JOIN participants ud ON ud.mpin = pr.mpin
-      LEFT JOIN trainers t ON t.username = pr.trainer_id
-      ${whereSql}
-      ORDER BY pr.mpin, pr.id
-      `,
-      params
-    );
-
-    // user_result scoped to project
-    const [results] = await pool.query(
-      `
-      SELECT ur.mpin, ur.trainer_id, ur.percentage, ur.total_time,
-             ur.status, ur.rounds_status
-      FROM user_result ur
-      JOIN participants ud ON ud.mpin = ur.mpin
-      ${whereSql}
-      `,
-      params
-    );
-
-    const [trainerRows] = await pool.query(
-      `SELECT id, name, photo_url FROM trainers ORDER BY id`
-    );
-
-    const [configRows] = await pool.query(
-      `
-      SELECT project_name, total_rounds, total_score, passing_percentage
-      FROM project_round_config
-      ${projectName ? 'WHERE project_name = ?' : ''}
-      `,
-      projectName ? [projectName] : []
-    );
-    const configMap = {};
-    for (const c of configRows) {
-      configMap[c.project_name] = {
-        totalRounds:       c.total_rounds,
-        totalScore:        c.total_score,
-        passingPercentage: Number(c.passing_percentage),
-      };
-    }
-
-    const roundsByUser = {};
-    for (const r of rounds) {
-      (roundsByUser[r.mpin] ||= []).push({
-        roundName:   r.round_name,
-        trainerId:   r.trainer_id,     // username
-        trainerName: r.trainer_name,   // display name from trainers
-        score:       r.score,
-      });
-    }
-
-    const resultByUser = {};
-    for (const r of results) resultByUser[r.mpin] = r;
-
-    const trainers = trainerRows.map((t) => {
-      const assigned = users
-        .filter((u) => u.trainer_id === t.id)
-        .map((u) => {
-          const ur  = resultByUser[u.mpin] || {};
-          const cfg = configMap[u.project_name] || {
-            totalRounds: 5, totalScore: 100, passingPercentage: 80,
-          };
-          return {
-            mpin:              u.mpin,
-            name:              u.name,
-            role:              u.role,
-            projectName:       u.project_name,
-            totalRounds:       cfg.totalRounds,
-            totalScore:        cfg.totalScore,
-            passingPercentage: cfg.passingPercentage,
-            percentage:        ur.percentage    ?? 0,
-            totalTime:         ur.total_time    ?? '00:00:00',
-            status:            ur.status        ?? 'Fail',
-            roundsStatus:      ur.rounds_status ?? 'In Progress',
-            rounds:            roundsByUser[u.mpin] || [],
-          };
-        });
-
-      const totalAssigned  = assigned.length;
-      const passCount      = assigned.filter((p) => p.status === 'Pass').length;
-      const passPercentage = totalAssigned > 0
-        ? Number(((passCount / totalAssigned) * 100).toFixed(2))
-        : 0;
-
-      const totalSecs = assigned.reduce((s, p) => s + hmsToSeconds(p.totalTime), 0);
-      const avgTime   = totalAssigned > 0
-        ? secondsToHms(Math.round(totalSecs / totalAssigned))
-        : '00:00:00';
-
-      return {
-        trainer: {
-          id: t.id,
-          name: t.name,
-          photoUrl: t.photo_url,
-          totalAssigned,
-          passPercentage,
-          avgTime,
-          participants: assigned,
-        },
-      };
-    });
-
-    res.json({
-      success: true,
-      generatedAt: new Date().toISOString(),
-      projectId:   project_id || null,
-      projectName,
-      totalTrainers: trainers.length,
-      trainers,
-    });
-  } catch (err) {
-    console.error('[setup.getGrid]', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-};
-
-// =====================================================================
-// GET /api/dashboard/:project_id
-// =====================================================================
 exports.getDashboard = async (req, res) => {
   try {
     const { project_id } = req.params;
 
-    let projectName = null;
-    if (project_id) {
-      const [[cfg]] = await pool.query(
-        `SELECT project_name FROM project_round_config WHERE id = ?`,
-        [project_id]
-      );
-      if (!cfg) {
-        return res.status(404).json({ success: false, error: 'Project not found' });
-      }
-      projectName = cfg.project_name;
+    const [[cfg]] = await pool.query(
+      `SELECT project_name FROM project_round_config WHERE id = ?`,
+      [project_id]
+    );
+    if (!cfg) return res.status(404).json({ success: false, error: 'Project not found' });
+
+    const projectName = cfg.project_name;
+
+    // -------------------------------------------------------------
+    // 1) Contest totals
+    // -------------------------------------------------------------
+    const [[totals]] = await pool.query(
+      `SELECT
+         COUNT(*)                                                       AS total_scheduled,
+         COALESCE(SUM(status = 'Pass'), 0)                              AS total_pass,
+         COALESCE(SUM(status = 'Fail'), 0)                              AS total_fail,
+         COALESCE(SUM(round_status = 'Completed'), 0)                   AS completed,
+         COALESCE(SUM(round_status = 'In Progress'), 0)                 AS in_progress,
+         COALESCE(SUM(delay_status = 'Delay'), 0)                       AS delayed_count,
+         COALESCE(ROUND(SUM(status = 'Pass') /
+               NULLIF(SUM(status = 'Pass') + SUM(status = 'Fail'), 0) * 100, 2), 0)
+                                                                        AS pass_rate,
+         COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(total_secs)), '%H:%i:%s'), '00:00:00')
+                                                                        AS avg_time
+       FROM dashboard
+      WHERE project_name = ?`,
+      [projectName]
+    );
+
+    // -------------------------------------------------------------
+    // 2) Today's live
+    // -------------------------------------------------------------
+    const [[todayLive]] = await pool.query(
+      `SELECT
+         COUNT(*)                                                       AS scheduled,
+         COALESCE(SUM(d.round_status = 'Completed'), 0)                 AS completed,
+         COALESCE(SUM(d.round_status = 'In Progress'), 0)               AS inProgress,
+         COALESCE(SUM(d.delay_status = 'Delay'), 0)                     AS delayed_count,
+         COALESCE(ROUND(SUM(d.status = 'Pass') /
+               NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)
+                                                                        AS passRate,
+         COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(d.total_secs)), '%H:%i:%s'), '00:00:00')
+                                                                        AS avgTime,
+         COUNT(DISTINCT d.trainer_id)                                   AS activeTrainers
+       FROM dashboard d
+       JOIN participants p ON p.mpin = d.mpin
+      WHERE d.project_name = ?
+        AND DATE(p.date) = CURDATE()`,
+      [projectName]
+    );
+
+    // -------------------------------------------------------------
+    // 3) Region-wise summary
+    // -------------------------------------------------------------
+    const [regionSummary] = await pool.query(
+      `SELECT
+         p.region,
+         p.zone,
+         COUNT(*)                                                       AS total,
+         COALESCE(SUM(d.round_status = 'Completed'), 0)                 AS completed,
+         COALESCE(ROUND(SUM(d.status = 'Pass') /
+               NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)
+                                                                        AS passRate,
+         COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(d.total_secs)), '%H:%i:%s'), '00:00:00')
+                                                                        AS avgTime
+       FROM dashboard d
+       JOIN participants p ON p.mpin = d.mpin
+      WHERE d.project_name = ?
+      GROUP BY p.region, p.zone
+      ORDER BY p.region, p.zone`,
+      [projectName]
+    );
+
+    // -------------------------------------------------------------
+    // 4) Trainer-wise summary
+    // -------------------------------------------------------------
+    const [trainerSummaryRows] = await pool.query(
+      `SELECT
+         t.id,
+         t.name,
+         t.username,
+         t.photo_url                                                    AS photoUrl,
+         COUNT(d.mpin)                                                  AS assigned,
+         COALESCE(ROUND(SUM(d.status = 'Pass') /
+               NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)
+                                                                        AS passRate,
+         COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(d.total_secs)), '%H:%i:%s'), '00:00:00')
+                                                                        AS avgTime
+       FROM trainers t
+       LEFT JOIN dashboard d ON d.trainer_id = t.username AND d.project_name = ?
+      GROUP BY t.id, t.name, t.username, t.photo_url
+      ORDER BY t.id`,
+      [projectName]
+    );
+
+    // -------------------------------------------------------------
+    // 5) Round journey per trainer
+    // -------------------------------------------------------------
+    const [journeyRows] = await pool.query(
+      `SELECT
+         pr.trainer_id,
+         LOWER(REPLACE(pr.round_name, ' ', '')) AS round_key,
+         COUNT(DISTINCT pr.mpin)                AS cnt
+       FROM participant_rounds pr
+       JOIN dashboard d ON d.mpin = pr.mpin
+      WHERE d.project_name = ?
+      GROUP BY pr.trainer_id, round_key`,
+      [projectName]
+    );
+
+    const journeyByTrainer = {};
+    for (const j of journeyRows) {
+      (journeyByTrainer[j.trainer_id] ||= {})[j.round_key] = String(j.cnt);
     }
 
-    const where  = [];
-    const params = [];
-    if (projectName) { where.push('p.project_name = ?'); params.push(projectName); }
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const trainerSummary = trainerSummaryRows.map(t => ({
+      id:           t.id,
+      name:         t.name,
+      photoUrl:     t.photoUrl,
+      assigned:     Number(t.assigned) || 0,
+      passRate:     Number(t.passRate) || 0,
+      avgTime:      t.avgTime ?? '00:00:00',
+      roundJourney: journeyByTrainer[t.username] || {},
+    }));
 
-    // ---- users ----
-    const [users] = await pool.query(
-      `SELECT p.mpin, p.name, p.region, p.zone, p.project_name, p.date
-         FROM participants p ${whereSql}`,
-      params
-    );
-
-    // ---- rounds ----
-    const [rounds] = await pool.query(
-      `SELECT pr.mpin,
-              pr.trainer_id,
-              t.name AS trainer_name,
-              pr.round_name,
-              pr.score, pr.start_time, pr.end_time
-         FROM participant_rounds pr
-         JOIN participants p ON p.mpin = pr.mpin
-         LEFT JOIN trainers t ON t.username = pr.trainer_id
-         ${whereSql}`,
-      params
-    );
-
-    // ---- results (now includes delay_status) ----
-    const [results] = await pool.query(
-      `SELECT ur.mpin, ur.trainer_id, ur.percentage,
-              ur.total_time, ur.status, ur.rounds_status,
-              ur.delay_status
-         FROM user_result ur
-         JOIN participants p ON p.mpin = ur.mpin
-         ${whereSql}`,
-      params
-    );
-
-    const [trainerRows] = await pool.query(
-      `SELECT id, name, username, photo_url FROM trainers ORDER BY id`
-    );
-
-    const resultByUser = {};
-    for (const r of results) resultByUser[r.mpin] = r;
-
-    const userByMpin = {};
-    for (const u of users) userByMpin[u.mpin] = u;
-
-    // ---- todayLive ----
-    const today = new Date();
-    const todayDate = [
-      today.getFullYear(),
-      String(today.getMonth() + 1).padStart(2, '0'),
-      String(today.getDate()).padStart(2, '0'),
-    ].join('-');
-
-    // scheduled → participants whose `date` = today (for selected project)
-    const todayMpins = new Set(
-      users
-        .filter(u => u.date && String(u.date).slice(0, 10) === todayDate)
-        .map(u => u.mpin)
-    );
-
-    const todayResults = results.filter(r => todayMpins.has(r.mpin));
-
-    const tPass = todayResults.filter(r => r.status === 'Pass').length;
-    const tFail = todayResults.filter(r => r.status === 'Fail').length;
-    const tPassRate = (tPass + tFail) > 0
-      ? Number(((tPass / (tPass + tFail)) * 100).toFixed(2))
-      : 0;
-
-    const tSecs    = todayResults.reduce((s, r) => s + hmsToSeconds(r.total_time), 0);
-    const tAvgTime = todayResults.length > 0
-      ? secondsToHms(Math.round(tSecs / todayResults.length))
-      : '00:00:00';
-
-    const todayCompleted  = todayResults.filter(r => r.rounds_status === 'Completed').length;
-    const todayInProgress = todayMpins.size - todayCompleted;
-    const todayDelayed    = todayResults.filter(r => r.delay_status === 'Delay').length;
-
-    const activeTrainers = new Set(rounds.map(r => r.trainer_id).filter(Boolean));
-
-    const todayLive = {
-      date:           todayDate,
-      scheduled:      todayMpins.size,
-      completed:      todayCompleted,
-      inProgress:     todayInProgress,
-      delayed:        todayDelayed,
-      passRate:       tPassRate,
-      avgTime:        tAvgTime,
-      activeTrainers: activeTrainers.size,
-    };
-
-    // ---- regionSummary ----
-    const regionBuckets = {};
-    for (const r of results) {
-      const u = userByMpin[r.mpin];
-      if (!u) continue;
-      const key = `${u.region || '—'}|${u.zone || '—'}`;
-      if (!regionBuckets[key]) {
-        regionBuckets[key] = {
-          region: u.region || '—', zone: u.zone || '—',
-          total: 0, completed: 0, pass: 0, fail: 0, totalSecs: 0,
-        };
-      }
-      const b = regionBuckets[key];
-      b.total += 1;
-      if (r.rounds_status === 'Completed') b.completed += 1;
-      if (r.status === 'Pass') b.pass += 1;
-      if (r.status === 'Fail') b.fail += 1;
-      b.totalSecs += hmsToSeconds(r.total_time);
-    }
-
-    const regionSummary = Object.values(regionBuckets)
-      .map((b) => ({
-        region:    b.region,
-        zone:      b.zone,
-        total:     b.total,
-        completed: b.completed,
-        passRate:  (b.pass + b.fail) > 0
-          ? Number(((b.pass / (b.pass + b.fail)) * 100).toFixed(2))
-          : 0,
-        avgTime:   b.total > 0
-          ? secondsToHms(Math.round(b.totalSecs / b.total))
-          : '00:00:00',
-      }))
-      .sort((a, b) =>
-        a.region.localeCompare(b.region) || a.zone.localeCompare(b.zone)
-      );
-
-    // ---- trainerSummary ----
-    const trainerSummary = trainerRows.map((t) => {
-      const assignedUsers = users.filter((u) => {
-        const userRounds = rounds.filter(r => r.mpin === u.mpin);
-        if (!userRounds.length) return false;
-        return userRounds[userRounds.length - 1].trainer_id === t.username;
-      });
-
-      const assigned = assignedUsers.length;
-      const pass = assignedUsers.filter(u => resultByUser[u.mpin]?.status === 'Pass').length;
-      const fail = assignedUsers.filter(u => resultByUser[u.mpin]?.status === 'Fail').length;
-
-      const secs = assignedUsers.reduce((s, u) => {
-        const ur = resultByUser[u.mpin];
-        return s + (ur ? hmsToSeconds(ur.total_time) : 0);
-      }, 0);
-
-      const roundJourney = {};
-      rounds.forEach(r => {
-        if (r.trainer_id !== t.username) return;
-        if (r.score == null || r.end_time == null) return;
-        const key = r.round_name.toLowerCase().replace(/\s+/g, '');
-        roundJourney[key] = (roundJourney[key] || 0) + 1;
-      });
-
-      return {
-        id:       t.id,
-        name:     t.name,
-        photoUrl: t.photo_url,
-        assigned,
-        passRate: (pass + fail) > 0
-          ? Number(((pass / (pass + fail)) * 100).toFixed(2))
-          : 0,
-        avgTime:  assigned > 0
-          ? secondsToHms(Math.round(secs / assigned))
-          : '00:00:00',
-        roundJourney: Object.fromEntries(
-          Object.entries(roundJourney).map(([k, v]) => [k, String(v)])
-        ),
-      };
-    });
-
-    // ---- contestTotals ----
-    const totalScheduled = users.length;
-    const totalAttempted = rounds.filter(r => r.score != null && r.end_time != null).length;
-    const overallPass = results.filter(r => r.status === 'Pass').length;
-    const overallFail = results.filter(r => r.status === 'Fail').length;
-    const overallPassRate = (overallPass + overallFail) > 0
-      ? Number(((overallPass / (overallPass + overallFail)) * 100).toFixed(2))
-      : 0;
-    const allSecs = results.reduce((s, r) => s + hmsToSeconds(r.total_time), 0);
-    const overallAvg = results.length > 0
-      ? secondsToHms(Math.round(allSecs / results.length))
-      : '00:00:00';
-
-    const totalCompleted  = results.filter(r => r.rounds_status === 'Completed').length;
-    const totalInProgress = results.filter(r => r.rounds_status !== 'Completed').length;
-    const totalDelayed    = results.filter(r => r.delay_status === 'Delay').length;
-
-    const contestTotals = {
-      totalScheduled,
-      totalAttempted,
-      completed:  totalCompleted,
-      inProgress: totalInProgress,
-      delayed:    totalDelayed,
-      passRate:   overallPassRate,
-      avgTime:    overallAvg,
-    };
-
+    // -------------------------------------------------------------
+    // 6) Response
+    // -------------------------------------------------------------
     res.json({
       success: true,
       generatedAt: new Date().toISOString(),
       projectId:   project_id || null,
       projectName,
-      todayLive,
-      regionSummary,
+
+      todayLive: {
+        date:           new Date().toISOString().slice(0, 10),
+        scheduled:      Number(todayLive.scheduled)      || 0,
+        completed:      Number(todayLive.completed)      || 0,
+        inProgress:     Number(todayLive.inProgress)     || 0,
+        delayed:        Number(todayLive.delayed_count)  || 0,
+        passRate:       Number(todayLive.passRate)       || 0,
+        avgTime:        todayLive.avgTime                ?? '00:00:00',
+        activeTrainers: Number(todayLive.activeTrainers) || 0,
+      },
+
+      regionSummary: regionSummary.map(r => ({
+        region:    r.region,
+        zone:      r.zone,
+        total:     Number(r.total)     || 0,
+        completed: Number(r.completed) || 0,
+        passRate:  Number(r.passRate)  || 0,
+        avgTime:   r.avgTime           ?? '00:00:00',
+      })),
+
       trainerSummary,
-      contestTotals,
+
+      contestTotals: {
+        totalScheduled: Number(totals.total_scheduled) || 0,
+        totalAttempted: (Number(totals.completed) || 0) + (Number(totals.in_progress) || 0),
+        completed:      Number(totals.completed)       || 0,
+        inProgress:     Number(totals.in_progress)     || 0,
+        delayed:        Number(totals.delayed_count)   || 0,
+        passRate:       Number(totals.pass_rate)       || 0,
+        avgTime:        totals.avg_time                ?? '00:00:00',
+      },
     });
   } catch (err) {
-    console.error('[setup.getDashboard]', err);
+    console.error('[getDashboard]', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };
-// =====================================================================
-// GET /api/filters
-// =====================================================================
-exports.getFilters = async (_req, res) => {
+
+
+exports.getGrid = async (req, res) => {
   try {
-    const [projectRows] = await pool.query(`
-      SELECT id, project_name, total_rounds, total_score, passing_percentage
-      FROM project_round_config
-      WHERE status = 'active'
-      ORDER BY project_name
-    `);
+    const { project_id } = req.params;
 
-    const [dateRows] = await pool.query(`
-      SELECT DISTINCT DATE(pr.start_time) AS d
-      FROM participant_rounds pr
-      WHERE pr.start_time IS NOT NULL
-      ORDER BY d DESC
-    `);
+    const [[cfg]] = await pool.query(
+      `SELECT project_name FROM project_round_config WHERE id = ?`,
+      [project_id]
+    );
+    if (!cfg) return res.status(404).json({ success: false, error: 'Project not found' });
 
-    const [zoneRows]       = await pool.query(`SELECT DISTINCT zone       FROM participants WHERE zone       IS NOT NULL AND zone       <> '' ORDER BY zone`);
-    const [regionRows]     = await pool.query(`SELECT DISTINCT region     FROM participants WHERE region     IS NOT NULL AND region     <> '' ORDER BY region`);
-    const [trainerRows]    = await pool.query(`SELECT id, name, photo_url FROM trainers ORDER BY name`);
-    const [roleRows]       = await pool.query(`SELECT DISTINCT role       FROM participants WHERE role       IS NOT NULL AND role       <> '' ORDER BY role`);
-    const [dealerNameRows] = await pool.query(`SELECT DISTINCT dealer_name FROM participants WHERE dealer_name IS NOT NULL AND dealer_name <> '' ORDER BY dealer_name`);
-    const [dealerCodeRows] = await pool.query(`SELECT DISTINCT dealer_code FROM participants WHERE dealer_code IS NOT NULL AND dealer_code <> '' ORDER BY dealer_code`);
+    const projectName = cfg.project_name;
 
-    const dates = dateRows.map(r =>
-      typeof r.d === 'string' ? r.d : new Date(r.d).toISOString().slice(0, 10)
+    // -------------------------------------------------------------
+    // 1) Participants + dashboard
+    // -------------------------------------------------------------
+    const [users] = await pool.query(
+      `SELECT
+         d.mpin,
+         p.name,
+         p.role,
+         d.project_name,
+         t.id         AS trainer_id,
+         t.name       AS trainer_name,
+         t.photo_url  AS trainer_photo,
+         d.marks,
+         d.max_marks,
+         d.completed,
+         d.required,
+         d.percentage,
+         d.total_time,
+         d.status,
+         d.round_status,
+         d.delay_status
+       FROM dashboard d
+       JOIN participants p ON p.mpin = d.mpin
+       LEFT JOIN trainers t ON t.username = d.trainer_id
+      WHERE d.project_name = ?
+      ORDER BY d.mpin`,
+      [projectName]
     );
 
+    // -------------------------------------------------------------
+    // 2) Rounds per participant
+    // -------------------------------------------------------------
+    const [rounds] = await pool.query(
+      `SELECT pr.mpin,
+              pr.round_name,
+              pr.trainer_id,
+              t.name AS trainer_name,
+              pr.score
+         FROM participant_rounds pr
+         JOIN dashboard d ON d.mpin = pr.mpin
+         LEFT JOIN trainers t ON t.username = pr.trainer_id
+        WHERE d.project_name = ?
+        ORDER BY pr.mpin, pr.id`,
+      [projectName]
+    );
+
+    // -------------------------------------------------------------
+    // 3) Trainers list
+    // -------------------------------------------------------------
+    const [trainers] = await pool.query(
+      `SELECT id, name, photo_url FROM trainers ORDER BY id`
+    );
+
+    // -------------------------------------------------------------
+    // 4) Trainer aggregates
+    // -------------------------------------------------------------
+    const [trainerAgg] = await pool.query(
+      `SELECT
+         t.id,
+         COUNT(d.mpin)                                                  AS total_assigned,
+         COALESCE(ROUND(SUM(d.status = 'Pass') /
+               NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)
+                                                                        AS pass_rate,
+         COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(d.total_secs)), '%H:%i:%s'), '00:00:00')
+                                                                        AS avg_time
+       FROM trainers t
+       LEFT JOIN dashboard d ON d.trainer_id = t.username AND d.project_name = ?
+      GROUP BY t.id`,
+      [projectName]
+    );
+
+    // -------------------------------------------------------------
+    // 5) Shape
+    // -------------------------------------------------------------
+    const roundsByUser = {};
+    for (const r of rounds) {
+      (roundsByUser[r.mpin] ||= []).push({
+        roundName:   r.round_name,
+        trainerId:   r.trainer_id,
+        trainerName: r.trainer_name,
+        score:       r.score,
+      });
+    }
+
+    const aggById = {};
+    for (const a of trainerAgg) aggById[a.id] = a;
+
+    const result = trainers.map((t) => {
+      const a = aggById[t.id] || {};
+      const assigned = users
+        .filter(u => u.trainer_id === t.id)
+        .map(u => ({
+          mpin:            u.mpin,
+          name:            u.name,
+          role:            u.role,
+          projectName:     u.project_name,
+          totalRounds:     Number(u.required)   || 5,
+          totalScore:      Number(u.max_marks)  || 100,
+          marks:           Number(u.marks)      || 0,
+          completedRounds: Number(u.completed)  || 0,
+          percentage:      Number(u.percentage) || 0,
+          totalTime:       u.total_time         ?? '00:00:00',
+          status:          u.status             ?? 'Fail',
+          roundsStatus:    u.round_status       ?? 'In Progress',
+          delayStatus:     u.delay_status       ?? 'On Time',
+          rounds:          roundsByUser[u.mpin] || [],
+        }));
+
+      return {
+        trainer: {
+          id:             t.id,
+          name:           t.name,
+          photoUrl:       t.photo_url,
+          totalAssigned:  Number(a.total_assigned) || 0,
+          passPercentage: Number(a.pass_rate)      || 0,
+          avgTime:        a.avg_time               ?? '00:00:00',
+          participants:   assigned,
+        },
+      };
+    });
+
+    // -------------------------------------------------------------
+    // 6) Response
+    // -------------------------------------------------------------
     res.json({
       success: true,
       generatedAt: new Date().toISOString(),
-      projects: projectRows.map(r => ({
-        id:                r.id,
-        name:              r.project_name,
-        totalRounds:       r.total_rounds,
-        totalScore:        r.total_score,
-        passingPercentage: Number(r.passing_percentage),
-      })),
-      dates,
-      zones:       zoneRows.map(r => r.zone),
-      regions:     regionRows.map(r => r.region),
-      trainers:    trainerRows.map(t => ({ id: t.id, name: t.name, photoUrl: t.photo_url })),
-      roles:       roleRows.map(r => r.role),
-      dealerNames: dealerNameRows.map(r => r.dealer_name),
-      dealerCodes: dealerCodeRows.map(r => r.dealer_code),
+      projectId:   project_id || null,
+      projectName,
+      totalTrainers: result.length,
+      trainers: result,
     });
   } catch (err) {
-    console.error('[setup.getFilters]', err);
+    console.error('[getGrid]', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };
-
 // =====================================================================
 // GET /api/export/users/:project_id
 // =====================================================================
@@ -627,203 +477,103 @@ exports.exportUsers = async (req, res) => {
 };
 
 // =====================================================================
-// GET /api/setup
+// GET /api/setup/projects
+// List all projects from project_round_config
 // =====================================================================
-exports.getSetup = async (_req, res) => {
+exports.getProjects = async (req, res) => {
   try {
-    const [cfg] = await pool.query(
-      `SELECT id, project_name
-         FROM setup_config
-        WHERE status = 'active'
-        ORDER BY id DESC LIMIT 1`
+    const [rows] = await pool.query(
+      `SELECT id,
+              project_name,
+              total_rounds,
+              total_score,
+              passing_percentage,
+              trainer_time_secs,
+              status,
+              created_at,
+              updated_at
+         FROM project_round_config
+        ORDER BY id`
     );
 
-    if (!cfg.length) {
-      return res.json({ success: true, setup: null, fields: [] });
-    }
+    // pretty shape for frontend
+    const projects = rows.map((r) => ({
+      id:                r.id,
+      projectName:       r.project_name,
+      totalRounds:       r.total_rounds,
+      totalScore:        r.total_score,
+      passingPercentage: Number(r.passing_percentage),
+      trainerTimeSecs:   r.trainer_time_secs,
+      status:            r.status,
+      createdAt:         r.created_at,
+      updatedAt:         r.updated_at,
+    }));
 
-    const [fields] = await pool.query(
-      `SELECT field_group, field_key, field_order, sort_order, is_selected
-         FROM setup_field_master
-        WHERE setup_config_id = ?
-        ORDER BY sort_order, field_order`,
-      [cfg[0].id]
-    );
-
-    res.json({
-      success: true,
-      setup: {
-        id: cfg[0].id,
-        projectName: cfg[0].project_name,
-      },
-      fields: fields.map((f) => ({
-        field_group: f.field_group,
-        field_key:   f.field_key,
-        field_order: f.field_order,
-        sort_order:  f.sort_order,
-        is_selected: !!f.is_selected,
-      })),
-    });
+    res.json({ success: true, total: projects.length, projects });
   } catch (err) {
-    console.error('[setup.getSetup]', err);
+    console.error('[getProjects]', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };
 
 // =====================================================================
-// POST /api/setup
-// body: { projectName, fields:[{ field_group, field_key,
-//                                field_order, sort_order, is_selected }] }
+// POST /api/setup/projects
+// Add a new project to project_round_config
+// Body: { projectName, totalRounds, totalScore,
+//         passingPercentage, trainerTimeSecs, status }
 // =====================================================================
-exports.saveSetup = async (req, res) => {
-  const conn = await pool.getConnection();
+exports.addProject = async (req, res) => {
   try {
-    const { projectName, fields } = req.body;
+    const {
+      projectName,
+      totalRounds,
+      totalScore,
+      passingPercentage,
+      trainerTimeSecs,
+      status,
+    } = req.body;
 
-    if (!projectName || !String(projectName).trim()) {
+    // ---- validate ----
+    if (!projectName || !projectName.trim()) {
       return res.status(400).json({ success: false, error: 'projectName is required' });
     }
-    if (!Array.isArray(fields) || fields.length === 0) {
-      return res.status(400).json({ success: false, error: 'fields array is required' });
+    if (totalRounds == null || totalRounds < 1 || totalRounds > 20) {
+      return res.status(400).json({ success: false, error: 'totalRounds must be 1–20' });
+    }
+    if (totalScore == null || totalScore < 1) {
+      return res.status(400).json({ success: false, error: 'totalScore must be > 0' });
+    }
+    if (passingPercentage == null || passingPercentage < 0 || passingPercentage > 100) {
+      return res.status(400).json({ success: false, error: 'passingPercentage must be 0–100' });
+    }
+    if (trainerTimeSecs == null || trainerTimeSecs < 0) {
+      return res.status(400).json({ success: false, error: 'trainerTimeSecs must be >= 0' });
     }
 
-    await conn.beginTransaction();
+    const safeStatus = status === 'inactive' ? 'inactive' : 'active';
 
-    // ---------- 1. setup_config : SELECT → UPDATE / INSERT ----------
-    const [cfg] = await conn.query(
-      `SELECT id FROM setup_config
-        WHERE status = 'active'
-        ORDER BY id DESC LIMIT 1`
+    // ---- insert ----
+    const [result] = await pool.query(
+      `INSERT INTO project_round_config
+         (project_name, total_rounds, total_score,
+          passing_percentage, trainer_time_secs, status)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        projectName.trim(),
+        totalRounds,
+        totalScore,
+        passingPercentage,
+        trainerTimeSecs,
+        safeStatus,
+      ]
     );
 
-    let setupConfigId;
-    let configAction;
-
-    if (cfg.length) {
-      // UPDATE
-      setupConfigId = cfg[0].id;
-      await conn.query(
-        `UPDATE setup_config
-            SET project_name = ?
-          WHERE id = ?`,
-        [String(projectName).trim(), setupConfigId]
-      );
-
-      // safety: remove any stray duplicates for the same active config
-      await conn.query(
-        `DELETE FROM setup_config
-          WHERE status = 'active' AND id <> ?`,
-        [setupConfigId]
-      );
-
-      configAction = 'updated';
-    } else {
-      // INSERT
-      const [ins] = await conn.query(
-        `INSERT INTO setup_config (project_name, status)
-         VALUES (?, 'active')`,
-        [String(projectName).trim()]
-      );
-      setupConfigId = ins.insertId;
-      configAction  = 'inserted';
-    }
-
-    // ---------- 2. setup_field_master : delete + re-insert ----------
-    await conn.query(
-      `DELETE FROM setup_field_master WHERE setup_config_id = ?`,
-      [setupConfigId]
-    );
-
-    const rows = fields.map((f) => [
-      setupConfigId,
-      f.field_key,
-      f.field_group,
-      Number(f.field_order) || 0,
-      Number(f.sort_order)  || 0,
-      f.is_selected ? 1 : 0,
-    ]);
-
-    await conn.query(
-      `INSERT INTO setup_field_master
-         (setup_config_id, field_key, field_group, field_order, sort_order, is_selected)
-       VALUES ?`,
-      [rows]
-    );
-
-    // ---------- 3. user_permission : SELECT → UPDATE / INSERT ----------
-    if (req.user && req.user.id) {
-      const permissions = {};
-      fields.forEach((f) => {
-        if (!permissions[f.field_group]) permissions[f.field_group] = {};
-        permissions[f.field_group][f.field_key] = !!f.is_selected;
-      });
-
-      const rolesJson   = JSON.stringify(req.body.allowedRoles   || []);
-      const zonesJson   = JSON.stringify(req.body.allowedZones   || []);
-      const regionsJson = JSON.stringify(req.body.allowedRegions || []);
-      const permsJson   = JSON.stringify(permissions);
-
-      const [existing] = await conn.query(
-        `SELECT id FROM user_permission
-          WHERE user_id = ? AND setup_config_id = ?
-          ORDER BY id DESC
-          LIMIT 1`,
-        [req.user.id, setupConfigId]
-      );
-
-      if (existing.length) {
-        // UPDATE existing row
-        await conn.query(
-          `UPDATE user_permission
-              SET allowed_roles   = ?,
-                  allowed_zones   = ?,
-                  allowed_regions = ?,
-                  permissions     = ?,
-                  updated_at      = CURRENT_TIMESTAMP
-            WHERE id = ?`,
-          [rolesJson, zonesJson, regionsJson, permsJson, existing[0].id]
-        );
-
-        // safety: remove stale duplicates for same (user, config)
-        await conn.query(
-          `DELETE FROM user_permission
-            WHERE user_id = ? AND setup_config_id = ? AND id <> ?`,
-          [req.user.id, setupConfigId, existing[0].id]
-        );
-      } else {
-        // INSERT new row
-        await conn.query(
-          `INSERT INTO user_permission
-             (user_id, setup_config_id, allowed_roles, allowed_zones,
-              allowed_regions, permissions)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          [
-            req.user.id,
-            setupConfigId,
-            rolesJson,
-            zonesJson,
-            regionsJson,
-            permsJson,
-          ]
-        );
-      }
-    }
-
-    await conn.commit();
-
-    res.json({
-      success: true,
-      message: 'Setup saved successfully',
-      configAction,
-      setupConfigId,
-      projectName: String(projectName).trim(),
-      fieldsSaved: rows.length,
-    });
+    res.json({ success: true, id: result.insertId, mode: 'created' });
   } catch (err) {
-    await conn.rollback();
-    console.error('[setup.saveSetup]', err);
+    console.error('[addProject]', err);
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ success: false, error: 'Project name already exists' });
+    }
     res.status(500).json({ success: false, error: err.message });
-  } finally {
-    conn.release();
   }
 };
