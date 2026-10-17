@@ -1,8 +1,7 @@
-const pool = require('../../config/db'); // adjust path to your db config
+const pool = require('../../config/db');
 
 // =====================================================================
 // GET /api/permissions/admins
-//   → list of admin users for the dropdown
 // =====================================================================
 exports.listAdmins = async (_req, res) => {
   try {
@@ -21,14 +20,10 @@ exports.listAdmins = async (_req, res) => {
 
 // =====================================================================
 // GET /api/permissions/options?userId=1
-//   → roles / zones / regions from participants
-//   → projects from project_round_config
-//   → existing admin_permission row for this admin
-//   (sections are static on the frontend — NOT fetched)
 // =====================================================================
 exports.getOptions = async (req, res) => {
   try {
-    // --- 1. Roles / Zones / Regions from participants ---
+    // --- Roles / Zones / Regions from participants ---
     const [pRows] = await pool.query(
       `SELECT role, zone, region FROM participants`
     );
@@ -36,7 +31,7 @@ exports.getOptions = async (req, res) => {
     const zones   = Array.from(new Set(pRows.map((p) => p.zone  ).filter(Boolean))).sort();
     const regions = Array.from(new Set(pRows.map((p) => p.region).filter(Boolean))).sort();
 
-    // --- 2. Projects from project_round_config ---
+    // --- Projects from project_round_config ---
     const [projRows] = await pool.query(
       `SELECT project_name
          FROM project_round_config
@@ -45,13 +40,12 @@ exports.getOptions = async (req, res) => {
     );
     const projects = projRows.map((p) => p.project_name);
 
-    // --- 3. Existing permissions for this admin ---
+    // --- Existing permissions for this admin ---
     let existing = null;
     if (req.query.userId) {
       const [up] = await pool.query(
         `SELECT allowed_roles, allowed_zones, allowed_regions,
-                allowed_projects,
-                permissions
+                allowed_projects, permissions
            FROM admin_permission
           WHERE admin_id = ?
           ORDER BY id DESC
@@ -82,18 +76,12 @@ exports.getOptions = async (req, res) => {
 
 // =====================================================================
 // POST /api/permissions
-// body: {
-//   userId,                         // → admin_id in DB
-//   allowedRoles, allowedZones, allowedRegions, allowedProjects,
-//   permissions: { <group>: { <field_key>: bool } }
-// }
-// → UPSERT into admin_permission
 // =====================================================================
 exports.savePermissions = async (req, res) => {
   const conn = await pool.getConnection();
   try {
     const {
-      userId,                       // = admin_id
+      userId,
       allowedRoles    = [],
       allowedZones    = [],
       allowedRegions  = [],
@@ -105,7 +93,6 @@ exports.savePermissions = async (req, res) => {
       return res.status(400).json({ success: false, error: 'userId is required' });
     }
 
-    // -------- serialize payload --------
     const rolesJson    = JSON.stringify(allowedRoles);
     const zonesJson    = JSON.stringify(allowedZones);
     const regionsJson  = JSON.stringify(allowedRegions);
@@ -114,7 +101,6 @@ exports.savePermissions = async (req, res) => {
 
     await conn.beginTransaction();
 
-    // -------- does a row already exist? --------
     const [existing] = await conn.query(
       `SELECT id FROM admin_permission
         WHERE admin_id = ?
@@ -126,7 +112,6 @@ exports.savePermissions = async (req, res) => {
     let action;
 
     if (existing.length) {
-      // ---------- UPDATE ----------
       await conn.query(
         `UPDATE admin_permission
             SET allowed_roles    = ?,
@@ -136,35 +121,22 @@ exports.savePermissions = async (req, res) => {
                 permissions      = ?,
                 updated_at       = CURRENT_TIMESTAMP
           WHERE id = ?`,
-        [
-          rolesJson, zonesJson, regionsJson,
-          projectsJson, permsJson,
-          existing[0].id,
-        ]
+        [rolesJson, zonesJson, regionsJson, projectsJson, permsJson, existing[0].id]
       );
 
-      // safety cleanup (UNIQUE prevents duplicates anyway)
       await conn.query(
-        `DELETE FROM admin_permission
-          WHERE admin_id = ? AND id <> ?`,
+        `DELETE FROM admin_permission WHERE admin_id = ? AND id <> ?`,
         [userId, existing[0].id]
       );
 
       action = 'updated';
     } else {
-      // ---------- INSERT ----------
       await conn.query(
         `INSERT INTO admin_permission
-           (admin_id,
-            allowed_roles, allowed_zones, allowed_regions,
-            allowed_projects,
-            permissions)
+           (admin_id, allowed_roles, allowed_zones, allowed_regions,
+            allowed_projects, permissions)
          VALUES (?, ?, ?, ?, ?, ?)`,
-        [
-          userId,
-          rolesJson, zonesJson, regionsJson,
-          projectsJson, permsJson,
-        ]
+        [userId, rolesJson, zonesJson, regionsJson, projectsJson, permsJson]
       );
 
       action = 'inserted';
