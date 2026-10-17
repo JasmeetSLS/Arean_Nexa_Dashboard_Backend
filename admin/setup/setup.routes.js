@@ -3,12 +3,16 @@ const router = express.Router();
 const setupController = require('./setup.controller');
 
 // ---- Setup panel ----
-router.get ('/projects', setupController.getProjects);
 router.post('/projects', setupController.addProject);
 
-// ---- Dashboard / Grid / Filters ----
-router.get('/grid/:project_id',         setupController.getGrid);
-router.get('/dashboard/:project_id',    setupController.getDashboard);
+router.get('/projects',                    setupController.getProjects);
+router.get('/dashboard/:project_id',       setupController.getDashboard);
+router.get('/grid-trainer/:project_id',     setupController.getGridTrainer);
+router.get('/grid-participant/:project_id', setupController.getGridParticipant);
+
+module.exports = router;
+
+module.exports = router;
 router.get('/export/users/:project_id', setupController.exportUsers);
 // router.get('/filters',      setupController.getFilters);
 

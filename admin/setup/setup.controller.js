@@ -1,174 +1,130 @@
-const ExcelJS = require('exceljs');
 const pool = require('../../config/db');
 
+// =====================================================================
+// GET /api/setup/projects
+// =====================================================================
+exports.getProjects = async (_req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, project_name AS \`name\`, project_name,
+              total_rounds, total_score, passing_percentage,
+              trainer_time_secs, status
+         FROM project_round_config
+        WHERE status = 'active'
+        ORDER BY id`
+    );
+    res.json({ success: true, total: rows.length, projects: rows });
+  } catch (err) {
+    console.error('[getProjects]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// =====================================================================
+// GET /api/setup/dashboard/:project_id
+//   ?regionPage=0&regionLimit=4
+// =====================================================================
 exports.getDashboard = async (req, res) => {
   try {
     const { project_id } = req.params;
+    const regionPage  = parseInt(req.query.regionPage, 10)  || 0;
+    const regionLimit = parseInt(req.query.regionLimit, 10) || 4;
+    const offset      = regionPage * regionLimit;
 
     const [[cfg]] = await pool.query(
       `SELECT project_name FROM project_round_config WHERE id = ?`,
       [project_id]
     );
     if (!cfg) return res.status(404).json({ success: false, error: 'Project not found' });
-
     const projectName = cfg.project_name;
 
-    // -------------------------------------------------------------
-    // 1) Contest totals
-    // -------------------------------------------------------------
-    const [[totals]] = await pool.query(
-      `SELECT
-         COUNT(*)                                                       AS total_scheduled,
-         COALESCE(SUM(status = 'Pass'), 0)                              AS total_pass,
-         COALESCE(SUM(status = 'Fail'), 0)                              AS total_fail,
-         COALESCE(SUM(round_status = 'Completed'), 0)                   AS completed,
-         COALESCE(SUM(round_status = 'In Progress'), 0)                 AS in_progress,
-         COALESCE(SUM(delay_status = 'Delay'), 0)                       AS delayed_count,
-         COALESCE(ROUND(SUM(status = 'Pass') /
-               NULLIF(SUM(status = 'Pass') + SUM(status = 'Fail'), 0) * 100, 2), 0)
-                                                                        AS pass_rate,
-         COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(total_secs)), '%H:%i:%s'), '00:00:00')
-                                                                        AS avg_time
-       FROM dashboard
-      WHERE project_name = ?`,
-      [projectName]
-    );
-
-    // -------------------------------------------------------------
-    // 2) Today's live
-    // -------------------------------------------------------------
+    // 1) TODAY'S LIVE
     const [[todayLive]] = await pool.query(
       `SELECT
-         COUNT(*)                                                       AS scheduled,
-         COALESCE(SUM(d.round_status = 'Completed'), 0)                 AS completed,
-         COALESCE(SUM(d.round_status = 'In Progress'), 0)               AS inProgress,
-         COALESCE(SUM(d.delay_status = 'Delay'), 0)                     AS delayed_count,
-         COALESCE(ROUND(SUM(d.status = 'Pass') /
-               NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)
-                                                                        AS passRate,
-         COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(d.total_secs)), '%H:%i:%s'), '00:00:00')
-                                                                        AS avgTime,
-         COUNT(DISTINCT d.trainer_id)                                   AS activeTrainers
-       FROM dashboard d
-       JOIN participants p ON p.mpin = d.mpin
-      WHERE d.project_name = ?
-        AND DATE(p.date) = CURDATE()`,
+          CURDATE()                                                                     AS \`date\`,
+          COUNT(*)                                                                      AS \`scheduled\`,
+          COALESCE(SUM(d.round_status IN ('Completed','In Progress')), 0)               AS \`attempted\`,
+          COALESCE(SUM(d.round_status = 'Completed'), 0)                                AS \`completed\`,
+          COALESCE(SUM(d.round_status = 'In Progress'), 0)                              AS \`inProgress\`,
+          COUNT(*) - COALESCE(SUM(d.round_status IN ('Completed','In Progress')), 0)   AS \`absentees\`,
+          COALESCE(SUM(d.delay_status = 'Delay'), 0)                                    AS \`delayed\`,
+          COALESCE(ROUND(SUM(d.status = 'Pass') /
+              NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)  AS \`passRate\`,
+          COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(d.total_secs)), '%H:%i:%s'), '00:00:00') AS \`avgTime\`,
+          COUNT(DISTINCT d.trainer_id)                                                  AS \`activeTrainers\`
+        FROM dashboard d
+        JOIN participants p ON p.mpin = d.mpin
+       WHERE d.project_name = ?
+         AND (
+              DATE(p.date) = CURDATE()
+              OR EXISTS (
+                   SELECT 1 FROM participant_rounds pr
+                    WHERE pr.mpin = d.mpin
+                      AND DATE(pr.start_time) = CURDATE()
+              )
+         )`,
       [projectName]
     );
 
-    // -------------------------------------------------------------
-    // 3) Region-wise summary
-    // -------------------------------------------------------------
+    // 2) CONTEST TOTALS
+    const [[contestTotals]] = await pool.query(
+      `SELECT
+          COUNT(*)                                                                      AS \`totalScheduled\`,
+          COALESCE(SUM(d.round_status IN ('Completed','In Progress')), 0)               AS \`totalAttempted\`,
+          COALESCE(SUM(d.round_status = 'Completed'), 0)                                AS \`completed\`,
+          COALESCE(SUM(d.round_status = 'In Progress'), 0)                              AS \`inProgress\`,
+          COUNT(*) - COALESCE(SUM(d.round_status IN ('Completed','In Progress')), 0)   AS \`totalAbsentees\`,
+          COALESCE(SUM(d.delay_status = 'Delay'), 0)                                    AS \`delayed\`,
+          COALESCE(ROUND(SUM(d.status = 'Pass') /
+              NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)  AS \`passRate\`,
+          COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(d.total_secs)), '%H:%i:%s'), '00:00:00') AS \`avgTime\`
+        FROM dashboard d
+       WHERE d.project_name = ?`,
+      [projectName]
+    );
+
+    // 3) REGIONS
+    const [[{ regionTotal }]] = await pool.query(
+      `SELECT COUNT(*) AS \`regionTotal\`
+         FROM (
+           SELECT p.region, p.zone
+             FROM dashboard d
+             JOIN participants p ON p.mpin = d.mpin
+            WHERE d.project_name = ?
+            GROUP BY p.region, p.zone
+         ) AS t`,
+      [projectName]
+    );
+
     const [regionSummary] = await pool.query(
       `SELECT
-         p.region,
-         p.zone,
-         COUNT(*)                                                       AS total,
-         COALESCE(SUM(d.round_status = 'Completed'), 0)                 AS completed,
-         COALESCE(ROUND(SUM(d.status = 'Pass') /
-               NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)
-                                                                        AS passRate,
-         COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(d.total_secs)), '%H:%i:%s'), '00:00:00')
-                                                                        AS avgTime
-       FROM dashboard d
-       JOIN participants p ON p.mpin = d.mpin
-      WHERE d.project_name = ?
-      GROUP BY p.region, p.zone
-      ORDER BY p.region, p.zone`,
-      [projectName]
+          p.region,
+          p.zone,
+          COALESCE(SUM(d.round_status = 'Completed'), 0)                                AS \`completed\`,
+          COALESCE(ROUND(SUM(d.status = 'Pass') /
+              NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)  AS \`passRate\`,
+          COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(d.total_secs)), '%H:%i:%s'), '00:00:00') AS \`avgTime\`
+        FROM dashboard d
+        JOIN participants p ON p.mpin = d.mpin
+       WHERE d.project_name = ?
+       GROUP BY p.region, p.zone
+       ORDER BY p.region, p.zone
+       LIMIT ? OFFSET ?`,
+      [projectName, regionLimit, offset]
     );
 
-    // -------------------------------------------------------------
-    // 4) Trainer-wise summary
-    // -------------------------------------------------------------
-    const [trainerSummaryRows] = await pool.query(
-      `SELECT
-         t.id,
-         t.name,
-         t.username,
-         t.photo_url                                                    AS photoUrl,
-         COUNT(d.mpin)                                                  AS assigned,
-         COALESCE(ROUND(SUM(d.status = 'Pass') /
-               NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)
-                                                                        AS passRate,
-         COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(d.total_secs)), '%H:%i:%s'), '00:00:00')
-                                                                        AS avgTime
-       FROM trainers t
-       LEFT JOIN dashboard d ON d.trainer_id = t.username AND d.project_name = ?
-      GROUP BY t.id, t.name, t.username, t.photo_url
-      ORDER BY t.id`,
-      [projectName]
-    );
-
-    // -------------------------------------------------------------
-    // 5) Round journey per trainer
-    // -------------------------------------------------------------
-    const [journeyRows] = await pool.query(
-      `SELECT
-         pr.trainer_id,
-         LOWER(REPLACE(pr.round_name, ' ', '')) AS round_key,
-         COUNT(DISTINCT pr.mpin)                AS cnt
-       FROM participant_rounds pr
-       JOIN dashboard d ON d.mpin = pr.mpin
-      WHERE d.project_name = ?
-      GROUP BY pr.trainer_id, round_key`,
-      [projectName]
-    );
-
-    const journeyByTrainer = {};
-    for (const j of journeyRows) {
-      (journeyByTrainer[j.trainer_id] ||= {})[j.round_key] = String(j.cnt);
-    }
-
-    const trainerSummary = trainerSummaryRows.map(t => ({
-      id:           t.id,
-      name:         t.name,
-      photoUrl:     t.photoUrl,
-      assigned:     Number(t.assigned) || 0,
-      passRate:     Number(t.passRate) || 0,
-      avgTime:      t.avgTime ?? '00:00:00',
-      roundJourney: journeyByTrainer[t.username] || {},
-    }));
-
-    // -------------------------------------------------------------
-    // 6) Response
-    // -------------------------------------------------------------
     res.json({
       success: true,
-      generatedAt: new Date().toISOString(),
-      projectId:   project_id || null,
+      projectId: project_id,
       projectName,
-
-      todayLive: {
-        date:           new Date().toISOString().slice(0, 10),
-        scheduled:      Number(todayLive.scheduled)      || 0,
-        completed:      Number(todayLive.completed)      || 0,
-        inProgress:     Number(todayLive.inProgress)     || 0,
-        delayed:        Number(todayLive.delayed_count)  || 0,
-        passRate:       Number(todayLive.passRate)       || 0,
-        avgTime:        todayLive.avgTime                ?? '00:00:00',
-        activeTrainers: Number(todayLive.activeTrainers) || 0,
-      },
-
-      regionSummary: regionSummary.map(r => ({
-        region:    r.region,
-        zone:      r.zone,
-        total:     Number(r.total)     || 0,
-        completed: Number(r.completed) || 0,
-        passRate:  Number(r.passRate)  || 0,
-        avgTime:   r.avgTime           ?? '00:00:00',
-      })),
-
-      trainerSummary,
-
-      contestTotals: {
-        totalScheduled: Number(totals.total_scheduled) || 0,
-        totalAttempted: (Number(totals.completed) || 0) + (Number(totals.in_progress) || 0),
-        completed:      Number(totals.completed)       || 0,
-        inProgress:     Number(totals.in_progress)     || 0,
-        delayed:        Number(totals.delayed_count)   || 0,
-        passRate:       Number(totals.pass_rate)       || 0,
-        avgTime:        totals.avg_time                ?? '00:00:00',
+      todayLive,
+      contestTotals,
+      regionSummary,
+      regionPagination: {
+        page: regionPage,
+        limit: regionLimit,
+        total: Number(regionTotal) || 0,
+        totalPages: Math.max(1, Math.ceil((Number(regionTotal) || 0) / regionLimit)),
       },
     });
   } catch (err) {
@@ -177,153 +133,176 @@ exports.getDashboard = async (req, res) => {
   }
 };
 
-
-exports.getGrid = async (req, res) => {
+// =====================================================================
+// GET /api/setup/grid-trainer/:project_id
+//   ?page=0&limit=5
+// =====================================================================
+exports.getGridTrainer = async (req, res) => {
   try {
     const { project_id } = req.params;
+    const page  = parseInt(req.query.page,  10) || 0;
+    const limit = parseInt(req.query.limit, 10) || 5;
+    const offset = page * limit;
 
     const [[cfg]] = await pool.query(
       `SELECT project_name FROM project_round_config WHERE id = ?`,
       [project_id]
     );
     if (!cfg) return res.status(404).json({ success: false, error: 'Project not found' });
-
     const projectName = cfg.project_name;
 
-    // -------------------------------------------------------------
-    // 1) Participants + dashboard
-    // -------------------------------------------------------------
-    const [users] = await pool.query(
-      `SELECT
-         d.mpin,
-         p.name,
-         p.role,
-         d.project_name,
-         t.id         AS trainer_id,
-         t.name       AS trainer_name,
-         t.photo_url  AS trainer_photo,
-         d.marks,
-         d.max_marks,
-         d.completed,
-         d.required,
-         d.percentage,
-         d.total_time,
-         d.status,
-         d.round_status,
-         d.delay_status
-       FROM dashboard d
-       JOIN participants p ON p.mpin = d.mpin
-       LEFT JOIN trainers t ON t.username = d.trainer_id
-      WHERE d.project_name = ?
-      ORDER BY d.mpin`,
-      [projectName]
-    );
-
-    // -------------------------------------------------------------
-    // 2) Rounds per participant
-    // -------------------------------------------------------------
-    const [rounds] = await pool.query(
-      `SELECT pr.mpin,
-              pr.round_name,
-              pr.trainer_id,
-              t.name AS trainer_name,
-              pr.score
-         FROM participant_rounds pr
-         JOIN dashboard d ON d.mpin = pr.mpin
-         LEFT JOIN trainers t ON t.username = pr.trainer_id
-        WHERE d.project_name = ?
-        ORDER BY pr.mpin, pr.id`,
-      [projectName]
-    );
-
-    // -------------------------------------------------------------
-    // 3) Trainers list
-    // -------------------------------------------------------------
+    // Get ONLY the 5 trainers for this page
     const [trainers] = await pool.query(
-      `SELECT id, name, photo_url FROM trainers ORDER BY id`
-    );
-
-    // -------------------------------------------------------------
-    // 4) Trainer aggregates
-    // -------------------------------------------------------------
-    const [trainerAgg] = await pool.query(
       `SELECT
-         t.id,
-         COUNT(d.mpin)                                                  AS total_assigned,
-         COALESCE(ROUND(SUM(d.status = 'Pass') /
-               NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)
-                                                                        AS pass_rate,
-         COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(d.total_secs)), '%H:%i:%s'), '00:00:00')
-                                                                        AS avg_time
-       FROM trainers t
-       LEFT JOIN dashboard d ON d.trainer_id = t.username AND d.project_name = ?
-      GROUP BY t.id`,
-      [projectName]
+          t.id,
+          t.name,
+          t.username,
+          t.photo_url                                                                   AS \`photoUrl\`,
+          COUNT(d.mpin)                                                                 AS \`totalAssigned\`,
+          COALESCE(SUM(d.round_status = 'Completed'), 0)                                AS \`completedCount\`,
+          COALESCE(ROUND(SUM(d.status = 'Pass') /
+              NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)  AS \`passPercentage\`,
+          COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(d.total_secs)), '%H:%i:%s'), '00:00:00') AS \`avgTime\`
+        FROM trainers t
+        LEFT JOIN dashboard d
+          ON d.trainer_id = t.username
+         AND d.project_name = ?
+       WHERE t.status = 'active'
+       GROUP BY t.id, t.name, t.username, t.photo_url
+       ORDER BY t.id
+       LIMIT ? OFFSET ?`,
+      [projectName, limit, offset]
     );
 
-    // -------------------------------------------------------------
-    // 5) Shape
-    // -------------------------------------------------------------
-    const roundsByUser = {};
+    const [[{ trainerTotal }]] = await pool.query(
+      `SELECT COUNT(*) AS \`trainerTotal\` FROM trainers WHERE status = 'active'`
+    );
+
+    res.json({
+      success: true,
+      projectId: project_id,
+      projectName,
+      trainers,
+      pagination: {
+        page, limit,
+        total: Number(trainerTotal) || 0,
+        totalPages: Math.max(1, Math.ceil((Number(trainerTotal) || 0) / limit)),
+      },
+    });
+  } catch (err) {
+    console.error('[getGridTrainer]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+// =====================================================================
+// GET /api/setup/grid-participant/:project_id
+//   ?page=0&limit=5
+//   Returns 5 participants for EACH of the 5 trainers on this page.
+// =====================================================================
+exports.getGridParticipant = async (req, res) => {
+  try {
+    const { project_id } = req.params;
+    const page  = parseInt(req.query.page,  10) || 0;
+    const limit = parseInt(req.query.limit, 10) || 5;
+    const offset = page * limit;
+
+    const [[cfg]] = await pool.query(
+      `SELECT project_name FROM project_round_config WHERE id = ?`,
+      [project_id]
+    );
+    if (!cfg) return res.status(404).json({ success: false, error: 'Project not found' });
+    const projectName = cfg.project_name;
+
+    // 1. Get the exact same 5 trainers for this page
+    const [trainerRows] = await pool.query(
+      `SELECT id, username
+         FROM trainers
+        WHERE status = 'active'
+        ORDER BY id
+        LIMIT ? OFFSET ?`,
+      [limit, offset]
+    );
+
+    if (trainerRows.length === 0) {
+      return res.json({ success: true, participants: [] });
+    }
+
+    const usernames = trainerRows.map(t => t.username);
+    const usernameToIdMap = {};
+    trainerRows.forEach(t => { usernameToIdMap[t.username] = t.id; });
+
+    // 2. Fetch up to 5 participants for EACH of these 5 trainers using ROW_NUMBER()
+    const [participants] = await pool.query(
+      `SELECT * FROM (
+          SELECT
+             d.mpin,
+             d.trainer_id,
+             d.project_name                                                               AS \`projectName\`,
+             d.marks,
+             d.max_marks                                                                  AS \`totalScore\`,
+             d.completed                                                                  AS \`completedRounds\`,
+             d.required                                                                   AS \`totalRounds\`,
+             d.percentage,
+             d.total_time                                                                 AS \`totalTime\`,
+             d.status,
+             d.round_status                                                               AS \`roundsStatus\`,
+             d.delay_status                                                               AS \`delayStatus\`,
+             p.name,
+             p.role,
+             ROW_NUMBER() OVER (PARTITION BY d.trainer_id ORDER BY d.mpin)                AS rn
+          FROM dashboard d
+          JOIN participants p ON p.mpin = d.mpin
+         WHERE d.project_name = ?
+           AND d.trainer_id IN (?)
+       ) AS x
+       WHERE rn <= 5`,
+      [projectName, usernames]
+    );
+
+    // 3. Fetch rounds for these participants
+    let rounds = [];
+    if (participants.length > 0) {
+      const mpins = participants.map(p => p.mpin);
+      [rounds] = await pool.query(
+        `SELECT pr.mpin, pr.round_name AS \`roundName\`, pr.trainer_id AS \`trainerId\`,
+                t.name AS \`trainerName\`, pr.score
+           FROM participant_rounds pr
+           LEFT JOIN trainers t ON t.username = pr.trainer_id
+          WHERE pr.mpin IN (?)
+          ORDER BY pr.mpin, pr.id`,
+        [mpins]
+      );
+    }
+
+    const roundsByMpin = {};
     for (const r of rounds) {
-      (roundsByUser[r.mpin] ||= []).push({
-        roundName:   r.round_name,
-        trainerId:   r.trainer_id,
-        trainerName: r.trainer_name,
+      (roundsByMpin[r.mpin] ||= []).push({
+        roundName:   r.roundName,
+        trainerId:   r.trainerId,
+        trainerName: r.trainerName,
         score:       r.score,
       });
     }
 
-    const aggById = {};
-    for (const a of trainerAgg) aggById[a.id] = a;
+    // 4. Shape response
+    const shaped = participants.map(p => ({
+      ...p,
+      trainerId: Number(usernameToIdMap[p.trainer_id]) || null,
+      marks: Number(p.marks) || 0,
+      totalScore: Number(p.totalScore) || 100,
+      completedRounds: Number(p.completedRounds) || 0,
+      totalRounds: Number(p.totalRounds) || 5,
+      percentage: Number(p.percentage) || 0,
+      rounds: roundsByMpin[p.mpin] || [],
+    }));
 
-    const result = trainers.map((t) => {
-      const a = aggById[t.id] || {};
-      const assigned = users
-        .filter(u => u.trainer_id === t.id)
-        .map(u => ({
-          mpin:            u.mpin,
-          name:            u.name,
-          role:            u.role,
-          projectName:     u.project_name,
-          totalRounds:     Number(u.required)   || 5,
-          totalScore:      Number(u.max_marks)  || 100,
-          marks:           Number(u.marks)      || 0,
-          completedRounds: Number(u.completed)  || 0,
-          percentage:      Number(u.percentage) || 0,
-          totalTime:       u.total_time         ?? '00:00:00',
-          status:          u.status             ?? 'Fail',
-          roundsStatus:    u.round_status       ?? 'In Progress',
-          delayStatus:     u.delay_status       ?? 'On Time',
-          rounds:          roundsByUser[u.mpin] || [],
-        }));
-
-      return {
-        trainer: {
-          id:             t.id,
-          name:           t.name,
-          photoUrl:       t.photo_url,
-          totalAssigned:  Number(a.total_assigned) || 0,
-          passPercentage: Number(a.pass_rate)      || 0,
-          avgTime:        a.avg_time               ?? '00:00:00',
-          participants:   assigned,
-        },
-      };
-    });
-
-    // -------------------------------------------------------------
-    // 6) Response
-    // -------------------------------------------------------------
     res.json({
       success: true,
-      generatedAt: new Date().toISOString(),
-      projectId:   project_id || null,
-      projectName,
-      totalTrainers: result.length,
-      trainers: result,
+      projectId: project_id,
+      participants: shaped,
     });
   } catch (err) {
-    console.error('[getGrid]', err);
+    console.error('[getGridParticipant]', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };
@@ -476,45 +455,6 @@ exports.exportUsers = async (req, res) => {
   }
 };
 
-// =====================================================================
-// GET /api/setup/projects
-// List all projects from project_round_config
-// =====================================================================
-exports.getProjects = async (req, res) => {
-  try {
-    const [rows] = await pool.query(
-      `SELECT id,
-              project_name,
-              total_rounds,
-              total_score,
-              passing_percentage,
-              trainer_time_secs,
-              status,
-              created_at,
-              updated_at
-         FROM project_round_config
-        ORDER BY id`
-    );
-
-    // pretty shape for frontend
-    const projects = rows.map((r) => ({
-      id:                r.id,
-      projectName:       r.project_name,
-      totalRounds:       r.total_rounds,
-      totalScore:        r.total_score,
-      passingPercentage: Number(r.passing_percentage),
-      trainerTimeSecs:   r.trainer_time_secs,
-      status:            r.status,
-      createdAt:         r.created_at,
-      updatedAt:         r.updated_at,
-    }));
-
-    res.json({ success: true, total: projects.length, projects });
-  } catch (err) {
-    console.error('[getProjects]', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-};
 
 // =====================================================================
 // POST /api/setup/projects
