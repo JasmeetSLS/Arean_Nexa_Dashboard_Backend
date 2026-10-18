@@ -21,22 +21,110 @@ exports.getProjects = async (_req, res) => {
 };
 
 // =====================================================================
-// GET /api/setup/dashboard/:project_id
-//   ?regionPage=0&regionLimit=4
+// GET /api/setup/filters
+// Cascading filters: ?project=...&zone=...&region=...&dealerName=...
+// =====================================================================
+exports.getFilters = async (req, res) => {
+  try {
+    const { project, zone, region, dealerName } = req.query;
+
+    // 1. Get ALL Projects (Top level dropdown)
+    const [projects] = await pool.query(
+      `SELECT id, project_name AS \`name\`, project_name, status 
+         FROM project_round_config 
+        WHERE status = 'active' 
+        ORDER BY id`
+    );
+
+    // If no project selected yet, just return the list of projects
+    if (!project) {
+      return res.json({ success: true, projects });
+    }
+
+    // 2. Get Zones (Depends only on project)
+    const [zones] = await pool.query(
+      `SELECT DISTINCT zone FROM participants WHERE project_name = ? AND zone IS NOT NULL ORDER BY zone`,
+      [project]
+    );
+
+    // 3. Get Regions (Depends on Zone)
+    let regionQuery = `SELECT DISTINCT region FROM participants WHERE project_name = ? AND region IS NOT NULL`;
+    const regionParams = [project];
+    if (zone) {
+      regionQuery += ` AND zone = ?`;
+      regionParams.push(zone);
+    }
+    regionQuery += ` ORDER BY region`;
+    const [regions] = await pool.query(regionQuery, regionParams);
+
+    // 4. Get Dealer Names (Depends on Zone + Region)
+    let dealerQuery = `SELECT DISTINCT dealer_name FROM participants WHERE project_name = ? AND dealer_name IS NOT NULL`;
+    const dealerParams = [project];
+    if (zone) { dealerQuery += ` AND zone = ?`; dealerParams.push(zone); }
+    if (region) { dealerQuery += ` AND region = ?`; dealerParams.push(region); }
+    dealerQuery += ` ORDER BY dealer_name`;
+    const [dealers] = await pool.query(dealerQuery, dealerParams);
+
+    // 5. Get Dealer Codes (Depends on Zone + Region + Dealer Name)
+    let codeQuery = `SELECT DISTINCT dealer_code FROM participants WHERE project_name = ? AND dealer_code IS NOT NULL`;
+    const codeParams = [project];
+    if (zone) { codeQuery += ` AND zone = ?`; codeParams.push(zone); }
+    if (region) { codeQuery += ` AND region = ?`; codeParams.push(region); }
+    if (dealerName) { codeQuery += ` AND dealer_name = ?`; codeParams.push(dealerName); }
+    codeQuery += ` ORDER BY dealer_code`;
+    const [codes] = await pool.query(codeQuery, codeParams);
+
+    // 6. Get Dates (Static per project)
+    const [dates] = await pool.query(
+      `SELECT DISTINCT date FROM participants WHERE project_name = ? AND date IS NOT NULL ORDER BY date DESC`,
+      [project]
+    );
+
+    // 7. Get Trainers & Roles (Static per project)
+    const [trainers] = await pool.query(`SELECT id, name, username FROM trainers WHERE status = 'active' ORDER BY name`);
+    const [roles] = await pool.query(`SELECT DISTINCT role FROM participants WHERE project_name = ? AND role IS NOT NULL ORDER BY role`, [project]);
+
+    res.json({
+      success: true,
+      projects,
+      zones: zones.map(z => z.zone),
+      regions: regions.map(r => r.region),
+      dealerNames: dealers.map(d => d.dealer_name),
+      dealerCodes: codes.map(c => c.dealer_code),
+      dates: dates.map(d => new Date(d.date).toISOString().split('T')[0]),
+      trainers: trainers,
+      roles: roles.map(r => r.role),
+    });
+  } catch (err) {
+    console.error('[getFilters]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// =====================================================================
+// GET /api/setup/dashboard
+// ?project=...&regionPage=0&regionLimit=4&date=...&zone=...
 // =====================================================================
 exports.getDashboard = async (req, res) => {
   try {
-    const { project_id } = req.params;
     const regionPage  = parseInt(req.query.regionPage, 10)  || 0;
     const regionLimit = parseInt(req.query.regionLimit, 10) || 4;
     const offset      = regionPage * regionLimit;
+    
+    const { project, date, zone, region, dealerName, dealerCode, trainer, role } = req.query;
 
-    const [[cfg]] = await pool.query(
-      `SELECT project_name FROM project_round_config WHERE id = ?`,
-      [project_id]
-    );
-    if (!cfg) return res.status(404).json({ success: false, error: 'Project not found' });
-    const projectName = cfg.project_name;
+    if (!project) return res.status(400).json({ success: false, error: 'Project is required' });
+
+    // --- DYNAMIC FILTERS ---
+    let filterSql = '';
+    const filterParams = [];
+    if (date)       { filterSql += ' AND DATE(p.date) = ?'; filterParams.push(date); }
+    if (zone)       { filterSql += ' AND p.zone = ?'; filterParams.push(zone); }
+    if (region)     { filterSql += ' AND p.region = ?'; filterParams.push(region); }
+    if (dealerName) { filterSql += ' AND p.dealer_name = ?'; filterParams.push(dealerName); }
+    if (dealerCode) { filterSql += ' AND p.dealer_code = ?'; filterParams.push(dealerCode); }
+    if (role)       { filterSql += ' AND p.role = ?'; filterParams.push(role); }
+    if (trainer)    { filterSql += ' AND d.trainer_id = ?'; filterParams.push(trainer); }
 
     // 1) TODAY'S LIVE
     const [[todayLive]] = await pool.query(
@@ -62,8 +150,9 @@ exports.getDashboard = async (req, res) => {
                     WHERE pr.mpin = d.mpin
                       AND DATE(pr.start_time) = CURDATE()
               )
-         )`,
-      [projectName]
+         )
+         ${filterSql}`,
+      [project, ...filterParams]
     );
 
     // 2) CONTEST TOTALS
@@ -79,8 +168,10 @@ exports.getDashboard = async (req, res) => {
               NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)  AS \`passRate\`,
           COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(d.total_secs)), '%H:%i:%s'), '00:00:00') AS \`avgTime\`
         FROM dashboard d
-       WHERE d.project_name = ?`,
-      [projectName]
+        JOIN participants p ON p.mpin = d.mpin
+       WHERE d.project_name = ?
+         ${filterSql}`,
+      [project, ...filterParams]
     );
 
     // 3) REGIONS
@@ -91,9 +182,10 @@ exports.getDashboard = async (req, res) => {
              FROM dashboard d
              JOIN participants p ON p.mpin = d.mpin
             WHERE d.project_name = ?
+              ${filterSql}
             GROUP BY p.region, p.zone
          ) AS t`,
-      [projectName]
+      [project, ...filterParams]
     );
 
     const [regionSummary] = await pool.query(
@@ -107,16 +199,16 @@ exports.getDashboard = async (req, res) => {
         FROM dashboard d
         JOIN participants p ON p.mpin = d.mpin
        WHERE d.project_name = ?
+         ${filterSql}
        GROUP BY p.region, p.zone
        ORDER BY p.region, p.zone
        LIMIT ? OFFSET ?`,
-      [projectName, regionLimit, offset]
+      [project, ...filterParams, regionLimit, offset]
     );
 
     res.json({
       success: true,
-      projectId: project_id,
-      projectName,
+      projectName: project,
       todayLive,
       contestTotals,
       regionSummary,
@@ -134,24 +226,44 @@ exports.getDashboard = async (req, res) => {
 };
 
 // =====================================================================
-// GET /api/setup/grid-trainer/:project_id
-//   ?page=0&limit=5
+// GET /api/setup/grid-trainer
+// ?project=...&page=0&limit=5&date=...
 // =====================================================================
 exports.getGridTrainer = async (req, res) => {
   try {
-    const { project_id } = req.params;
     const page  = parseInt(req.query.page,  10) || 0;
     const limit = parseInt(req.query.limit, 10) || 5;
     const offset = page * limit;
 
-    const [[cfg]] = await pool.query(
-      `SELECT project_name FROM project_round_config WHERE id = ?`,
-      [project_id]
-    );
-    if (!cfg) return res.status(404).json({ success: false, error: 'Project not found' });
-    const projectName = cfg.project_name;
+    const { project, date, zone, region, dealerName, dealerCode, trainer, role } = req.query;
 
-    // Get ONLY the 5 trainers for this page
+    if (!project) return res.status(400).json({ success: false, error: 'Project is required' });
+
+    // --- DYNAMIC FILTERS ---
+    let filterSql = '';
+    const filterParams = [];
+    if (date)       { filterSql += ' AND DATE(p.date) = ?'; filterParams.push(date); }
+    if (zone)       { filterSql += ' AND p.zone = ?'; filterParams.push(zone); }
+    if (region)     { filterSql += ' AND p.region = ?'; filterParams.push(region); }
+    if (dealerName) { filterSql += ' AND p.dealer_name = ?'; filterParams.push(dealerName); }
+    if (dealerCode) { filterSql += ' AND p.dealer_code = ?'; filterParams.push(dealerCode); }
+    if (role)       { filterSql += ' AND p.role = ?'; filterParams.push(role); }
+    if (trainer)    { filterSql += ' AND d.trainer_id = ?'; filterParams.push(trainer); }
+
+    // 1. Fetch DISTINCT round names
+    const [roundRows] = await pool.query(
+      `SELECT DISTINCT pr.round_name 
+         FROM participant_rounds pr
+         JOIN dashboard d ON d.mpin = pr.mpin
+         JOIN participants p ON p.mpin = d.mpin
+        WHERE d.project_name = ?
+          ${filterSql}
+        ORDER BY pr.round_name ASC`,
+      [project, ...filterParams]
+    );
+    const rounds = roundRows.map(r => r.round_name);
+
+    // 2. Get ONLY the 5 trainers for this page
     const [trainers] = await pool.query(
       `SELECT
           t.id,
@@ -167,21 +279,30 @@ exports.getGridTrainer = async (req, res) => {
         LEFT JOIN dashboard d
           ON d.trainer_id = t.username
          AND d.project_name = ?
+        LEFT JOIN participants p ON p.mpin = d.mpin
        WHERE t.status = 'active'
+         ${filterSql}
        GROUP BY t.id, t.name, t.username, t.photo_url
        ORDER BY t.id
        LIMIT ? OFFSET ?`,
-      [projectName, limit, offset]
+      [project, ...filterParams, limit, offset]
     );
 
+    // Count total trainers that match the filters
     const [[{ trainerTotal }]] = await pool.query(
-      `SELECT COUNT(*) AS \`trainerTotal\` FROM trainers WHERE status = 'active'`
+      `SELECT COUNT(DISTINCT t.id) AS \`trainerTotal\` 
+         FROM trainers t
+         LEFT JOIN dashboard d ON d.trainer_id = t.username AND d.project_name = ?
+         LEFT JOIN participants p ON p.mpin = d.mpin
+        WHERE t.status = 'active'
+          ${filterSql}`,
+      [project, ...filterParams]
     );
 
     res.json({
       success: true,
-      projectId: project_id,
-      projectName,
+      projectName: project,
+      rounds,
       trainers,
       pagination: {
         page, limit,
@@ -194,33 +315,46 @@ exports.getGridTrainer = async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 };
+
 // =====================================================================
-// GET /api/setup/grid-participant/:project_id
-//   ?page=0&limit=5
-//   Returns 5 participants for EACH of the 5 trainers on this page.
+// GET /api/setup/grid-participant
+// ?project=...&page=0&limit=5&participantPage=0&date=...
 // =====================================================================
 exports.getGridParticipant = async (req, res) => {
   try {
-    const { project_id } = req.params;
-    const page  = parseInt(req.query.page,  10) || 0;
-    const limit = parseInt(req.query.limit, 10) || 5;
-    const offset = page * limit;
+    const page  = parseInt(req.query.page,  10) || 0;  
+    const participantPage  = parseInt(req.query.participantPage, 10) || 0;
+    const limit = parseInt(req.query.limit, 10) || 5;   
 
-    const [[cfg]] = await pool.query(
-      `SELECT project_name FROM project_round_config WHERE id = ?`,
-      [project_id]
-    );
-    if (!cfg) return res.status(404).json({ success: false, error: 'Project not found' });
-    const projectName = cfg.project_name;
+    const { project, date, zone, region, dealerName, dealerCode, trainer, role } = req.query;
+
+    if (!project) return res.status(400).json({ success: false, error: 'Project is required' });
+
+    const offset = page * limit;
+    const pOffset = participantPage * limit;
+
+    // --- DYNAMIC FILTERS ---
+    let filterSql = '';
+    const filterParams = [];
+    if (date)       { filterSql += ' AND DATE(p.date) = ?'; filterParams.push(date); }
+    if (zone)       { filterSql += ' AND p.zone = ?'; filterParams.push(zone); }
+    if (region)     { filterSql += ' AND p.region = ?'; filterParams.push(region); }
+    if (dealerName) { filterSql += ' AND p.dealer_name = ?'; filterParams.push(dealerName); }
+    if (dealerCode) { filterSql += ' AND p.dealer_code = ?'; filterParams.push(dealerCode); }
+    if (role)       { filterSql += ' AND p.role = ?'; filterParams.push(role); }
+    if (trainer)    { filterSql += ' AND d.trainer_id = ?'; filterParams.push(trainer); }
 
     // 1. Get the exact same 5 trainers for this page
     const [trainerRows] = await pool.query(
-      `SELECT id, username
-         FROM trainers
-        WHERE status = 'active'
-        ORDER BY id
+      `SELECT DISTINCT t.id, t.username
+         FROM trainers t
+         LEFT JOIN dashboard d ON d.trainer_id = t.username AND d.project_name = ?
+         LEFT JOIN participants p ON p.mpin = d.mpin
+        WHERE t.status = 'active'
+          ${filterSql}
+        ORDER BY t.id
         LIMIT ? OFFSET ?`,
-      [limit, offset]
+      [project, ...filterParams, limit, offset]
     );
 
     if (trainerRows.length === 0) {
@@ -231,7 +365,7 @@ exports.getGridParticipant = async (req, res) => {
     const usernameToIdMap = {};
     trainerRows.forEach(t => { usernameToIdMap[t.username] = t.id; });
 
-    // 2. Fetch up to 5 participants for EACH of these 5 trainers using ROW_NUMBER()
+    // 2. Fetch paginated participants for EACH trainer
     const [participants] = await pool.query(
       `SELECT * FROM (
           SELECT
@@ -254,9 +388,10 @@ exports.getGridParticipant = async (req, res) => {
           JOIN participants p ON p.mpin = d.mpin
          WHERE d.project_name = ?
            AND d.trainer_id IN (?)
+           ${filterSql}
        ) AS x
-       WHERE rn <= 5`,
-      [projectName, usernames]
+       WHERE rn > ? AND rn <= ?`,
+      [project, usernames, ...filterParams, pOffset, pOffset + limit]
     );
 
     // 3. Fetch rounds for these participants
@@ -298,7 +433,6 @@ exports.getGridParticipant = async (req, res) => {
 
     res.json({
       success: true,
-      projectId: project_id,
       participants: shaped,
     });
   } catch (err) {
