@@ -5,5 +5,6 @@ const permissionController = require('./permission.controller');
 router.get ('/permissions/admins',  permissionController.listAdmins);
 router.get ('/permissions/options', permissionController.getOptions);
 router.post('/permissions',         permissionController.savePermissions);
+router.get('/my-permissions', permissionController.getMyPermissions);
 
 module.exports = router;

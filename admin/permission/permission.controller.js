@@ -158,3 +158,26 @@ exports.savePermissions = async (req, res) => {
     conn.release();
   }
 };
+
+// =====================================================================
+// GET /api/setup/my-permissions
+// =====================================================================
+exports.getMyPermissions = async (req, res) => {
+  try {
+    const { userId } = req.user;
+    
+    // Fetch permissions for the logged in admin
+    const [[row]] = await pool.query(
+      `SELECT permissions FROM admin_permission WHERE admin_id = ? LIMIT 1`,
+      [userId]
+    );
+
+    // If no row exists, default to empty object (nothing visible)
+    const perms = row?.permissions || {};
+
+    res.json({ success: true, permissions: perms });
+  } catch (err) {
+    console.error('[getMyPermissions]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};

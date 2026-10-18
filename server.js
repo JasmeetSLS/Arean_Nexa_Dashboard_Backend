@@ -21,7 +21,7 @@ const webhookRoutes    = require('./admin/webhook/webhook.routes');
 const requireAuth      = require('./middleware/auth');
 
 app.use('/api', authRoutes);
-app.use('/api', setupRoutes);
+app.use('/api',requireAuth, setupRoutes);
 app.use('/api', requireAuth, permissionRoutes);
 app.use('/api', requireAuth, chatRoutes);
 app.use('/api', requireAuth,webhookRoutes );
