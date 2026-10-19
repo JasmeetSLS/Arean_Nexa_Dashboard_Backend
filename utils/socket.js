@@ -10,6 +10,23 @@ function initSocket(httpServer) {
     path: '/socket.io',
   });
 
+  // ============================================================
+  // 🔍 NEW — engine-level errors (this is what catches the 400)
+  // ============================================================
+  io.engine.on('connection_error', (err) => {
+    console.log('========================================');
+    console.log('[socket engine error]');
+    console.log('  code      :', err.code);
+    console.log('  message   :', err.message);
+    console.log('  context   :', err.context);
+    console.log('  req.url   :', err.req?.url);
+    console.log('  req.method:', err.req?.method);
+    console.log('  req.headers:', err.req?.headers);
+    console.log('========================================');
+  });
+
+  console.log('[socket] initSocket called — engine listeners attached');
+
   io.use((socket, next) => {
     try {
       const token =
@@ -51,10 +68,16 @@ function initSocket(httpServer) {
     const myRoom = `${type}:${userId}`;
     socket.join(myRoom);
 
+    // ============================================================
+    // 🔍 NEW — join global notification room
+    // ============================================================
+    socket.join(`user:${userId}`);
+
     console.log('========================================');
     console.log('[socket connect] socketId =', socket.id);
     console.log('[socket connect] user     =', socket.user);
-    console.log('[socket connect] joined room:', myRoom);
+    console.log('[socket connect] joined room:', myRoom, '| user room: user:' + userId);
+    console.log('[socket connect] transport:', socket.conn.transport.name);
     console.log('[socket connect] otherType:', otherType);
     console.log('========================================');
 
@@ -97,6 +120,16 @@ function initSocket(httpServer) {
 
         socket.emit('receive_message', row);
         io.to(targetRoom).emit('receive_message', row);
+
+        // ============================================================
+        // 🔍 NEW — realtime dashboard/notification signal to recipient
+        // ============================================================
+        io.to(`user:${peerId}`).emit('data:changed', {
+          scope:    'chat',
+          peerId:   userId,
+          peerType: type,
+          message:  row,
+        });
 
         ack?.({ ok: true, data: row });
       } catch (err) {
