@@ -1,61 +1,19 @@
-const pool     = require('../../config/db');
-const JWTUtils = require('../../utils/jwt.util');
+const pool = require('../../config/db');
 
-exports.me = (req, res) => {
-  res.json({
-    success: true,
-    user: {
-      userId:   req.user.userId,      // decoded by middleware
-      username: req.user.username,
-      type:     req.user.type,
-    },
-  });
-};
-
-// =====================================================================
-// GET /api/users
-//   admin   → all trainers
-//   trainer → all admins
-// =====================================================================
-exports.getUsers = async (req, res) => {
+/* =====================================================================
+   GET /api/chat/users
+   ===================================================================== */
+exports.getChatUsers = async (req, res) => {
   try {
-    const { type } = req.user;
+    const userId = req.user.userId;
+    const type   = req.user.type;
 
-    let rows;
-    if (type === 'admin') {
-      [rows] = await pool.query(
-        `SELECT id, name AS username, photo_url FROM trainers ORDER BY name`
-      );
-    } else {
-      [rows] = await pool.query(
-        `SELECT id, username, NULL AS photo_url
-           FROM admin WHERE status = 'active' ORDER BY username`
-      );
-    }
+    // inline: otherType
+    let otherType;
+    if (type === 'admin') otherType = 'trainer';
+    else                  otherType = 'admin';
 
-    res.json({
-      success: true,
-      users: rows.map((r) => ({
-        userId:   r.id,
-        username: r.username,
-        type:     type === 'admin' ? 'trainer' : 'admin',
-        photoUrl: r.photo_url,
-      })),
-    });
-  } catch (err) {
-    console.error('[chat.getUsers]', err);
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-// =====================================================================
-// GET /api/conversations
-// =====================================================================
-exports.getConversations = async (req, res) => {
-  try {
-    const { userId, type } = req.user;
-    const otherType = type === 'admin' ? 'trainer' : 'admin';
-
+    // fetch peers
     let people;
     if (type === 'admin') {
       const [rows] = await pool.query(
@@ -70,10 +28,10 @@ exports.getConversations = async (req, res) => {
       people = rows;
     }
 
-    const conversations = [];
+    const users = [];
 
     for (const p of people) {
-      const [lastRows] = await pool.query(
+      const [last] = await pool.query(
         `SELECT id, message, sender_type, sender_id, created_at, is_read
            FROM chat_messages
           WHERE (sender_type = ? AND sender_id = ? AND receiver_type = ? AND receiver_id = ?)
@@ -83,7 +41,7 @@ exports.getConversations = async (req, res) => {
          otherType, p.id, type, userId]
       );
 
-      const [[{ unread }]] = await pool.query(
+      const [unreadRows] = await pool.query(
         `SELECT COUNT(*) AS unread FROM chat_messages
           WHERE receiver_type = ? AND receiver_id = ?
             AND sender_type  = ? AND sender_id  = ?
@@ -91,103 +49,67 @@ exports.getConversations = async (req, res) => {
         [type, userId, otherType, p.id]
       );
 
-      conversations.push({
-        id:          p.id,        // conversation id = peerId
-        peerId:      p.id,
-        peerType:    otherType,
-        peerName:    p.username,
+      users.push({
+        userId:      p.id,
+        username:    p.username,
+        type:        otherType,
         photoUrl:    p.photo_url,
-        lastMessage: lastRows[0] || null,
-        unread,
+        lastMessage: last[0] || null,
+        unread:      unreadRows[0].unread,
+        cacheKey:    last[0] ? new Date(last[0].created_at).getTime() : 0,
       });
     }
 
-    conversations.sort(
-      (a, b) =>
-        new Date(b.lastMessage?.created_at || 0) -
-        new Date(a.lastMessage?.created_at || 0)
-    );
+    users.sort((a, b) => b.cacheKey - a.cacheKey);
 
-    res.json({ success: true, conversations });
+    res.json({ success: true, users });
   } catch (err) {
-    console.error('[chat.getConversations]', err);
+    console.error('[chat.getChatUsers]', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// =====================================================================
-// POST /api/conversations   { peerId }
-// =====================================================================
-exports.createConversation = async (req, res) => {
-  try {
-    const { userId, type } = req.user;
-    const peerId = Number(req.body?.peerId);
-
-    if (!peerId) {
-      return res.status(400).json({ success: false, message: 'peerId required' });
-    }
-
-    const otherType = type === 'admin' ? 'trainer' : 'admin';
-    const table     = otherType === 'trainer' ? 'trainers' : 'admin';
-    const nameCol   = otherType === 'trainer' ? 'name' : 'username';
-
-    const [rows] = await pool.query(
-      `SELECT id, ${nameCol} AS username FROM ${table} WHERE id = ? LIMIT 1`,
-      [peerId]
-    );
-    if (!rows.length) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-
-    const [existing] = await pool.query(
-      `SELECT id FROM chat_messages
-        WHERE (sender_type = ? AND sender_id = ? AND receiver_type = ? AND receiver_id = ?)
-           OR (sender_type = ? AND sender_id = ? AND receiver_type = ? AND receiver_id = ?)
-        LIMIT 1`,
-      [type, userId, otherType, peerId,
-       otherType, peerId, type, userId]
-    );
-
-    res.json({
-      success: true,
-      created: !existing.length,
-      conversation: {
-        id:       peerId,
-        peerId,
-        peerType: otherType,
-        peerName: rows[0].username,
-      },
-    });
-  } catch (err) {
-    console.error('[chat.createConversation]', err);
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-// =====================================================================
-// GET /api/conversations/:id/messages
-//   :id = peerId
-// =====================================================================
+/* =====================================================================
+   GET /api/chat/messages/:userId
+   ===================================================================== */
 exports.getMessages = async (req, res) => {
   try {
-    const { userId, type } = req.user;
-    const peerId    = Number(req.params.id);
-    const otherType = type === 'admin' ? 'trainer' : 'admin';
-    const limit     = Math.min(Number(req.query.limit) || 100, 500);
+    const userId = req.user.userId;
+    const type   = req.user.type;
 
-    const [rows] = await pool.query(
-      `SELECT id, sender_type, sender_id, receiver_type, receiver_id,
-              message, is_read, created_at
-         FROM chat_messages
-        WHERE (sender_type = ? AND sender_id = ? AND receiver_type = ? AND receiver_id = ?)
+    // inline: otherType
+    let otherType;
+    if (type === 'admin') otherType = 'trainer';
+    else                  otherType = 'admin';
+
+    const peerId = Number(req.params.userId);
+    const limit  = Math.min(Number(req.query.limit) || 50, 200);
+    const before = req.query.before ? Number(req.query.before) : null;
+
+    let sql = `
+      SELECT id, sender_type, sender_id, receiver_type, receiver_id,
+             message, is_read, created_at
+        FROM chat_messages
+       WHERE (
+              (sender_type = ? AND sender_id = ? AND receiver_type = ? AND receiver_id = ?)
            OR (sender_type = ? AND sender_id = ? AND receiver_type = ? AND receiver_id = ?)
-        ORDER BY id DESC LIMIT ?`,
-      [type, userId, otherType, peerId,
-       otherType, peerId, type, userId,
-       limit]
-    );
+             )`;
+    const params = [
+      type, userId, otherType, peerId,
+      otherType, peerId, type, userId,
+    ];
 
-    // mark read on fetch
+    if (before) {
+      sql += ` AND id < ?`;
+      params.push(before);
+    }
+
+    sql += ` ORDER BY id DESC LIMIT ?`;
+    params.push(limit);
+
+    const [rows] = await pool.query(sql, params);
+
+    // mark incoming messages as read
     await pool.query(
       `UPDATE chat_messages SET is_read = 1
         WHERE receiver_type = ? AND receiver_id = ?
@@ -196,41 +118,75 @@ exports.getMessages = async (req, res) => {
       [type, userId, otherType, peerId]
     );
 
-    res.json({ success: true, messages: rows.reverse() });
+    // realtime notify peer
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`${otherType}:${peerId}`).emit('message_read', {
+        byType: type,
+        byId:   userId,
+        peerId: userId,
+      });
+    }
+
+    res.json({
+      success:  true,
+      peerId,
+      messages: rows.reverse(),
+      hasMore:  rows.length === limit,
+    });
   } catch (err) {
     console.error('[chat.getMessages]', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// =====================================================================
-// POST /api/chat/trainer-token/:trainerId   (admin only)
-// =====================================================================
-exports.trainerToken = async (req, res) => {
+/* =====================================================================
+   POST /api/chat/messages   { peerId, message }
+   ===================================================================== */
+exports.sendMessage = async (req, res) => {
   try {
-    if (req.user.type !== 'admin') {
-      return res.status(403).json({ success: false, message: 'Admin only' });
+    const userId = req.user.userId;
+    const type   = req.user.type;
+
+    // inline: otherType
+    let otherType;
+    if (type === 'admin') otherType = 'trainer';
+    else                  otherType = 'admin';
+
+    const peerId = Number(req.body?.peerId);
+    const text   = (req.body?.message || '').trim();
+
+    if (!peerId || !text) {
+      return res.status(400).json({ success: false, message: 'peerId & message required' });
     }
 
-    const trainerId = Number(req.params.trainerId);
-    const [rows] = await pool.query(
-      `SELECT id, name FROM trainers WHERE id = ? LIMIT 1`,
-      [trainerId]
+    const [ins] = await pool.query(
+      `INSERT INTO chat_messages
+         (sender_type, sender_id, receiver_type, receiver_id, message)
+       VALUES (?, ?, ?, ?, ?)`,
+      [type, userId, otherType, peerId, text]
     );
-    if (!rows.length) {
-      return res.status(404).json({ success: false, message: 'Trainer not found' });
+
+    const row = {
+      id:            ins.insertId,
+      sender_type:   type,
+      sender_id:     userId,
+      receiver_type: otherType,
+      receiver_id:   peerId,
+      message:       text,
+      is_read:       0,
+      created_at:    new Date().toISOString(),
+    };
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`${otherType}:${peerId}`).emit('receive_message', row);
+      io.to(`${type}:${userId}`).emit('receive_message', row);
     }
 
-    const t = rows[0];
-    const token = JWTUtils.generateToken({
-      userId:   t.id,
-      username: t.name,
-      type:     'trainer',
-    }, '2h');
-
-    res.json({ success: true, token, trainer: { userId: t.id, name: t.name } });
+    res.json({ success: true, data: row });
   } catch (err) {
-    console.error('[chat.trainerToken]', err);
+    console.error('[chat.sendMessage]', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
