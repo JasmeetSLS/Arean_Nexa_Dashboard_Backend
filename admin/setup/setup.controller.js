@@ -1,5 +1,5 @@
 const pool = require('../../config/db');
-
+const ExcelJS = require('exceljs');
 // =====================================================================
 // HELPER: Fetch Admin Permissions
 // =====================================================================
@@ -713,6 +713,187 @@ exports.addProject = async (req, res) => {
   } catch (err) {
     if (err.code === 'ER_DUP_ENTRY')
       return res.status(409).json({ success: false, error: 'Project already exists' });
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// =====================================================================
+// GET /api/setup/participants/template
+// Download XLSX template — headers + 2 sample rows
+// =====================================================================
+exports.downloadParticipantTemplate = async (_req, res) => {
+  try {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Participants', {
+      views: [{ state: 'frozen', ySplit: 1 }],
+    });
+
+    ws.columns = [
+      { header: 'mpin',         key: 'mpin',         width: 18 },
+      { header: 'name',         key: 'name',         width: 26 },
+      { header: 'role',         key: 'role',         width: 14 },
+      { header: 'region',       key: 'region',       width: 12 },
+      { header: 'zone',         key: 'zone',         width: 14 },
+      { header: 'city',         key: 'city',         width: 16 },
+      { header: 'dealer_name',  key: 'dealer_name',  width: 26 },
+      { header: 'dealer_code',  key: 'dealer_code',  width: 14 },
+      { header: 'date',         key: 'date',         width: 14 },
+    ];
+
+    const header = ws.getRow(1);
+    header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    header.alignment = { vertical: 'middle', horizontal: 'center' };
+    header.height = 24;
+    header.eachCell((cell) => {
+      cell.fill   = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4C1D95' } };
+      cell.border = {
+        top:    { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        left:   { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        right:  { style: 'thin', color: { argb: 'FFE5E7EB' } },
+      };
+    });
+
+    // sample rows — no project_name
+    ws.addRow({
+      mpin:        'U001',
+      name:        'RAHUL SHARMA',
+      role:        'RM',
+      region:      'C1',
+      zone:        'Central',
+      city:        'Delhi',
+      dealer_name: 'PERFECT AUTO SERVICES',
+      dealer_code: 'AH01-AH',
+      date:        '10/15/2026',
+    });
+    ws.addRow({
+      mpin:        'U002',
+      name:        'PRIYA VERMA',
+      role:        'SRM',
+      region:      'C1',
+      zone:        'Central',
+      city:        'Delhi',
+      dealer_name: 'PERFECT AUTO SERVICES',
+      dealer_code: 'AH01-AH',
+      date:        '10/15/2026',
+    });
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader('Content-Disposition', 'attachment; filename="participants_template.xlsx"');
+
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error('[downloadParticipantTemplate]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+exports.uploadParticipants = async (req, res) => {
+  try {
+    const { project } = req.body;
+
+    if (!project?.trim())
+      return res.status(400).json({ success: false, error: 'project is required' });
+    if (!req.file)
+      return res.status(400).json({ success: false, error: 'Excel file is required' });
+
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(req.file.buffer);
+
+    const ws = wb.worksheets[0];
+    if (!ws)
+      return res.status(400).json({ success: false, error: 'No worksheet found' });
+
+    const headers = [];
+    ws.getRow(1).eachCell((cell, col) => {
+      headers[col] = String(cell.value || '').trim().toLowerCase();
+    });
+
+    const rows   = [];
+    const errors = [];
+
+    ws.eachRow((row, rowNo) => {
+      if (rowNo === 1) return;
+
+      const obj = {};
+      headers.forEach((h, col) => {
+        if (!h) return;
+        let v = row.getCell(col).value;
+        if (v instanceof Date) v = v.toISOString().slice(0, 10);
+        obj[h] = v == null ? '' : String(v).trim();
+      });
+
+      if (Object.values(obj).every(v => !v)) return;
+
+      const mpin = obj.mpin;
+      const name = obj.name;
+      if (!mpin) { errors.push(`Row ${rowNo}: mpin required`); return; }
+      if (!name) { errors.push(`Row ${rowNo}: name required`); return; }
+
+      let dateVal = null;
+      const raw = obj.date;
+      if (raw) {
+        if (/^\d{4}-\d{2}-\d{2}/.test(raw)) dateVal = raw.slice(0, 10);
+        else if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(raw)) {
+          const [mm, dd, yyyy] = raw.split('/');
+          dateVal = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
+        }
+      }
+
+      // ⚡ project comes from req.body.project — NOT from Excel
+      rows.push([
+        project.trim(),       // project_name  ← injected here
+        mpin,
+        name,
+        obj.role        || null,
+        obj.region      || null,
+        obj.zone        || null,
+        obj.city        || null,
+        obj.dealer_name || null,
+        obj.dealer_code || null,
+        dateVal,
+      ]);
+    });
+
+    if (errors.length > 0)
+      return res.status(400).json({
+        success: false,
+        error: errors.slice(0, 5).join('; '),
+        errors,
+      });
+
+    if (rows.length === 0)
+      return res.status(400).json({ success: false, error: 'Excel has no data rows' });
+
+    const [result] = await pool.query(
+      `INSERT INTO participants
+         (project_name, mpin, name, role, region, zone,
+          city, dealer_name, dealer_code, date)
+       VALUES ?
+       ON DUPLICATE KEY UPDATE
+         project_name = VALUES(project_name),
+         name         = VALUES(name),
+         role         = VALUES(role),
+         region       = VALUES(region),
+         zone         = VALUES(zone),
+         city         = VALUES(city),
+         dealer_name  = VALUES(dealer_name),
+         dealer_code  = VALUES(dealer_code),
+         date         = VALUES(date)`,
+      [rows]
+    );
+
+    res.json({
+      success: true,
+      inserted: result.affectedRows,
+      total:    rows.length,
+    });
+  } catch (err) {
+    console.error('[uploadParticipants]', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };
