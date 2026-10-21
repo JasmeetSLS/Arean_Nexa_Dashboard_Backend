@@ -768,18 +768,18 @@ exports.uploadParticipants = async (req, res) => {
         }
       }
 
-      rows.push([
-        project,
+      rows.push({
+        project_name: project,
         mpin,
         name,
-        obj.role        || null,
-        obj.region      || null,
-        obj.zone        || null,
-        obj.city        || null,
-        obj.dealer_name || null,
-        obj.dealer_code || null,
-        dateVal,
-      ]);
+        role:        obj.role        || null,
+        region:      obj.region      || null,
+        zone:        obj.zone        || null,
+        city:        obj.city        || null,
+        dealer_name: obj.dealer_name || null,
+        dealer_code: obj.dealer_code || null,
+        date:        dateVal,
+      });
     });
 
     if (errors.length > 0)
@@ -792,27 +792,72 @@ exports.uploadParticipants = async (req, res) => {
     if (rows.length === 0)
       return res.status(400).json({ success: false, error: 'Excel has no data rows' });
 
-    const [result] = await pool.query(
-      `INSERT INTO participants
-         (project_name, mpin, name, role, region, zone,
-          city, dealer_name, dealer_code, date)
-       VALUES ?
-       ON DUPLICATE KEY UPDATE
-         project_name = VALUES(project_name),
-         name         = VALUES(name),
-         role         = VALUES(role),
-         region       = VALUES(region),
-         zone         = VALUES(zone),
-         city         = VALUES(city),
-         dealer_name  = VALUES(dealer_name),
-         dealer_code  = VALUES(dealer_code),
-         date         = VALUES(date)`,
-      [rows]
+    // ---- check which mpins already exist ----
+    const mpins = rows.map(r => r.mpin);
+    const [existing] = await pool.query(
+      `SELECT mpin FROM participants WHERE mpin IN (?)`,
+      [mpins]
     );
+    const existingSet = new Set(existing.map(r => r.mpin));
+
+    const toInsert = rows.filter(r => !existingSet.has(r.mpin));
+    const toUpdate = rows.filter(r =>  existingSet.has(r.mpin));
+
+    // ---- INSERT new rows ----
+    let insertedCount = 0;
+    if (toInsert.length > 0) {
+      const insertValues = toInsert.map(r => [
+        r.project_name, r.mpin, r.name, r.role, r.region,
+        r.zone, r.city, r.dealer_name, r.dealer_code, r.date,
+      ]);
+
+      const [insRes] = await pool.query(
+        `INSERT INTO participants
+           (project_name, mpin, name, role, region, zone,
+            city, dealer_name, dealer_code, date)
+         VALUES ?`,
+        [insertValues]
+      );
+      insertedCount = insRes.affectedRows;
+    }
+
+    // ---- UPDATE existing rows ----
+    let updatedCount = 0;
+    if (toUpdate.length > 0) {
+      for (const r of toUpdate) {
+        const [updRes] = await pool.query(
+          `UPDATE participants SET
+             project_name = ?,
+             name         = ?,
+             role         = ?,
+             region       = ?,
+             zone         = ?,
+             city         = ?,
+             dealer_name  = ?,
+             dealer_code  = ?,
+             date         = ?
+           WHERE mpin = ?`,
+          [
+            r.project_name,
+            r.name,
+            r.role,
+            r.region,
+            r.zone,
+            r.city,
+            r.dealer_name,
+            r.dealer_code,
+            r.date,
+            r.mpin,
+          ]
+        );
+        updatedCount += updRes.affectedRows;
+      }
+    }
 
     res.json({
       success: true,
-      inserted: result.affectedRows,
+      inserted: insertedCount,
+      updated:  updatedCount,
       total:    rows.length,
     });
   } catch (err) {
