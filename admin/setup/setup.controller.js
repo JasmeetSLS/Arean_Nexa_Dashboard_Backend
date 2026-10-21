@@ -648,89 +648,71 @@ exports.exportUsers = async (req, res) => {
   }
 };
 
-// =====================================================================
-// GET /api/setup/projects
-// Used specifically by the Setup Panel
-// =====================================================================
 exports.getProjects = async (_req, res) => {
   try {
     const [rows] = await pool.query(
       `SELECT id,
-              project_name       AS \`projectName\`,
-              total_rounds       AS \`totalRounds\`,
-              total_score        AS \`totalScore\`,
-              passing_percentage AS \`passingPercentage\`,
-              trainer_time_secs  AS \`trainerTimeSecs\`,
+              project_name       AS projectName,
+              total_rounds       AS totalRounds,
+              rounds,
+              total_score        AS totalScore,
+              passing_percentage AS passingPercentage,
+              trainer_time_secs  AS trainerTimeSecs,
               status,
-              created_at         AS \`createdAt\`
+              created_at         AS createdAt
          FROM project_round_config
         ORDER BY id`
     );
-
-    res.json({ success: true, total: rows.length, projects: rows });
+    const projects = rows.map(r => ({
+      ...r,
+      rounds: typeof r.rounds === 'string' ? JSON.parse(r.rounds) : (r.rounds || []),
+    }));
+    res.json({ success: true, projects });
   } catch (err) {
-    console.error('[getProjects]', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };
-// =====================================================================
-// POST /api/setup/projects
-// Add a new project to project_round_config
-// Body: { projectName, totalRounds, totalScore,
-//         passingPercentage, trainerTimeSecs, status }
-// =====================================================================
+
 exports.addProject = async (req, res) => {
   try {
-    const {
-      projectName,
-      totalRounds,
-      totalScore,
-      passingPercentage,
-      trainerTimeSecs,
-      status,
-    } = req.body;
+    const { projectName, rounds, passingPercentage, trainerTimeSecs } = req.body;
 
-    // ---- validate ----
-    if (!projectName || !projectName.trim()) {
+    if (!projectName?.trim())
       return res.status(400).json({ success: false, error: 'projectName is required' });
-    }
-    if (totalRounds == null || totalRounds < 1 || totalRounds > 20) {
-      return res.status(400).json({ success: false, error: 'totalRounds must be 1–20' });
-    }
-    if (totalScore == null || totalScore < 1) {
-      return res.status(400).json({ success: false, error: 'totalScore must be > 0' });
-    }
-    if (passingPercentage == null || passingPercentage < 0 || passingPercentage > 100) {
+    if (!Array.isArray(rounds) || rounds.length === 0 || rounds.length > 20)
+      return res.status(400).json({ success: false, error: 'rounds must be 1–20 items' });
+    if (passingPercentage == null || passingPercentage < 0 || passingPercentage > 100)
       return res.status(400).json({ success: false, error: 'passingPercentage must be 0–100' });
-    }
-    if (trainerTimeSecs == null || trainerTimeSecs < 0) {
+    if (trainerTimeSecs == null || trainerTimeSecs < 0)
       return res.status(400).json({ success: false, error: 'trainerTimeSecs must be >= 0' });
-    }
 
-    const safeStatus = status === 'inactive' ? 'inactive' : 'active';
+    const cleaned = rounds.map((r, i) => ({
+      name:  String(r?.name || '').trim() || `Round ${i + 1}`,
+      score: Number(r?.score) || 0,
+    }));
 
-    // ---- insert ----
+    const totalRounds = cleaned.length;
+    const totalScore  = cleaned.reduce((a, r) => a + r.score, 0);
+
     const [result] = await pool.query(
       `INSERT INTO project_round_config
-         (project_name, total_rounds, total_score,
+         (project_name, total_rounds, rounds, total_score,
           passing_percentage, trainer_time_secs, status)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, 'active')`,
       [
         projectName.trim(),
         totalRounds,
+        JSON.stringify(cleaned),
         totalScore,
         passingPercentage,
         trainerTimeSecs,
-        safeStatus,
       ]
     );
 
-    res.json({ success: true, id: result.insertId, mode: 'created' });
+    res.json({ success: true, id: result.insertId });
   } catch (err) {
-    console.error('[addProject]', err);
-    if (err.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ success: false, error: 'Project name already exists' });
-    }
+    if (err.code === 'ER_DUP_ENTRY')
+      return res.status(409).json({ success: false, error: 'Project already exists' });
     res.status(500).json({ success: false, error: err.message });
   }
 };

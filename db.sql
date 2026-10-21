@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS `admin_permission` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_admin` (`admin_id`),
   CONSTRAINT `fk_ap_admin` FOREIGN KEY (`admin_id`) REFERENCES `admin` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- Data exporting was unselected.
 
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS `chat_messages` (
   KEY `idx_sender` (`sender_type`,`sender_id`,`id`),
   KEY `idx_receiver` (`receiver_type`,`receiver_id`,`id`),
   KEY `idx_unread` (`receiver_type`,`receiver_id`,`is_read`)
-) ENGINE=InnoDB AUTO_INCREMENT=19 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=22 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- Data exporting was unselected.
 
