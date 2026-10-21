@@ -717,87 +717,8 @@ exports.addProject = async (req, res) => {
   }
 };
 
-// =====================================================================
-// GET /api/setup/participants/template
-// Download XLSX template — headers + 2 sample rows
-// =====================================================================
-exports.downloadParticipantTemplate = async (_req, res) => {
-  try {
-    const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet('Participants', {
-      views: [{ state: 'frozen', ySplit: 1 }],
-    });
-
-    ws.columns = [
-      { header: 'mpin',         key: 'mpin',         width: 18 },
-      { header: 'name',         key: 'name',         width: 26 },
-      { header: 'role',         key: 'role',         width: 14 },
-      { header: 'region',       key: 'region',       width: 12 },
-      { header: 'zone',         key: 'zone',         width: 14 },
-      { header: 'city',         key: 'city',         width: 16 },
-      { header: 'dealer_name',  key: 'dealer_name',  width: 26 },
-      { header: 'dealer_code',  key: 'dealer_code',  width: 14 },
-      { header: 'date',         key: 'date',         width: 14 },
-    ];
-
-    const header = ws.getRow(1);
-    header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-    header.alignment = { vertical: 'middle', horizontal: 'center' };
-    header.height = 24;
-    header.eachCell((cell) => {
-      cell.fill   = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4C1D95' } };
-      cell.border = {
-        top:    { style: 'thin', color: { argb: 'FFE5E7EB' } },
-        left:   { style: 'thin', color: { argb: 'FFE5E7EB' } },
-        bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
-        right:  { style: 'thin', color: { argb: 'FFE5E7EB' } },
-      };
-    });
-
-    // sample rows — no project_name
-    ws.addRow({
-      mpin:        'U001',
-      name:        'RAHUL SHARMA',
-      role:        'RM',
-      region:      'C1',
-      zone:        'Central',
-      city:        'Delhi',
-      dealer_name: 'PERFECT AUTO SERVICES',
-      dealer_code: 'AH01-AH',
-      date:        '10/15/2026',
-    });
-    ws.addRow({
-      mpin:        'U002',
-      name:        'PRIYA VERMA',
-      role:        'SRM',
-      region:      'C1',
-      zone:        'Central',
-      city:        'Delhi',
-      dealer_name: 'PERFECT AUTO SERVICES',
-      dealer_code: 'AH01-AH',
-      date:        '10/15/2026',
-    });
-
-    res.setHeader(
-      'Content-Type',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    );
-    res.setHeader('Content-Disposition', 'attachment; filename="participants_template.xlsx"');
-
-    await wb.xlsx.write(res);
-    res.end();
-  } catch (err) {
-    console.error('[downloadParticipantTemplate]', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-};
-
 exports.uploadParticipants = async (req, res) => {
   try {
-    const { project } = req.body;
-
-    if (!project?.trim())
-      return res.status(400).json({ success: false, error: 'project is required' });
     if (!req.file)
       return res.status(400).json({ success: false, error: 'Excel file is required' });
 
@@ -829,10 +750,13 @@ exports.uploadParticipants = async (req, res) => {
 
       if (Object.values(obj).every(v => !v)) return;
 
-      const mpin = obj.mpin;
-      const name = obj.name;
-      if (!mpin) { errors.push(`Row ${rowNo}: mpin required`); return; }
-      if (!name) { errors.push(`Row ${rowNo}: name required`); return; }
+      const project = obj.project_name;
+      const mpin    = obj.mpin;
+      const name    = obj.name;
+
+      if (!project) { errors.push(`Row ${rowNo}: project_name required`); return; }
+      if (!mpin)    { errors.push(`Row ${rowNo}: mpin required`);         return; }
+      if (!name)    { errors.push(`Row ${rowNo}: name required`);         return; }
 
       let dateVal = null;
       const raw = obj.date;
@@ -844,9 +768,8 @@ exports.uploadParticipants = async (req, res) => {
         }
       }
 
-      // ⚡ project comes from req.body.project — NOT from Excel
       rows.push([
-        project.trim(),       // project_name  ← injected here
+        project,
         mpin,
         name,
         obj.role        || null,
@@ -894,6 +817,79 @@ exports.uploadParticipants = async (req, res) => {
     });
   } catch (err) {
     console.error('[uploadParticipants]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+exports.downloadParticipantTemplate = async (_req, res) => {
+  try {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Participants', {
+      views: [{ state: 'frozen', ySplit: 1 }],
+    });
+
+    ws.columns = [
+      { header: 'project_name', key: 'project_name', width: 18 },
+      { header: 'mpin',         key: 'mpin',         width: 18 },
+      { header: 'name',         key: 'name',         width: 26 },
+      { header: 'role',         key: 'role',         width: 14 },
+      { header: 'region',       key: 'region',       width: 12 },
+      { header: 'zone',         key: 'zone',         width: 14 },
+      { header: 'city',         key: 'city',         width: 16 },
+      { header: 'dealer_name',  key: 'dealer_name',  width: 26 },
+      { header: 'dealer_code',  key: 'dealer_code',  width: 14 },
+      { header: 'date',         key: 'date',         width: 14 },
+    ];
+
+    const header = ws.getRow(1);
+    header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    header.alignment = { vertical: 'middle', horizontal: 'center' };
+    header.height = 24;
+    header.eachCell((cell) => {
+      cell.fill   = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4C1D95' } };
+      cell.border = {
+        top:    { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        left:   { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        right:  { style: 'thin', color: { argb: 'FFE5E7EB' } },
+      };
+    });
+
+    ws.addRow({
+      project_name: 'Arena L1',
+      mpin:         'U056',
+      name:         'KARTHIK RAJ',
+      role:         'RM',
+      region:       'S1',
+      zone:         'South',
+      city:         'Bengaluru',
+      dealer_name:  'PREM MOTORS PVT. LTD.',
+      dealer_code:  '08D4-08',
+      date:         '10/24/2026',
+    });
+    ws.addRow({
+      project_name: 'Arena L1',
+      mpin:         'U057',
+      name:         'SWATHI NAYAK',
+      role:         'SRM',
+      region:       'S1',
+      zone:         'South',
+      city:         'Bengaluru',
+      dealer_name:  'PREM MOTORS PVT. LTD.',
+      dealer_code:  '08D4-08',
+      date:         '10/24/2026',
+    });
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader('Content-Disposition', 'attachment; filename="participants_template.xlsx"');
+
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error('[downloadParticipantTemplate]', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };
