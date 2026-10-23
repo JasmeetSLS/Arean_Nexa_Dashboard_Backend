@@ -729,6 +729,7 @@ exports.uploadParticipants = async (req, res) => {
     if (!ws)
       return res.status(400).json({ success: false, error: 'No worksheet found' });
 
+    // ---- read headers (row 1), trim + lowercase ----
     const headers = [];
     ws.getRow(1).eachCell((cell, col) => {
       headers[col] = String(cell.value || '').trim().toLowerCase();
@@ -736,6 +737,16 @@ exports.uploadParticipants = async (req, res) => {
 
     const rows   = [];
     const errors = [];
+
+    // ---- normalize "9:30 AM" → "09:30 AM" ----
+    const parseSlotTime = (v) => {
+      if (!v) return null;
+      const s = String(v).trim().toUpperCase().replace(/\s+/g, ' ');
+      const m = s.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/);
+      if (!m) return null;
+      const [, h, mm, ap] = m;
+      return `${h.padStart(2, '0')}:${mm} ${ap}`;
+    };
 
     ws.eachRow((row, rowNo) => {
       if (rowNo === 1) return;
@@ -748,6 +759,7 @@ exports.uploadParticipants = async (req, res) => {
         obj[h] = v == null ? '' : String(v).trim();
       });
 
+      // skip fully empty rows
       if (Object.values(obj).every(v => !v)) return;
 
       const project = obj.project_name;
@@ -758,11 +770,13 @@ exports.uploadParticipants = async (req, res) => {
       if (!mpin)    { errors.push(`Row ${rowNo}: mpin required`);         return; }
       if (!name)    { errors.push(`Row ${rowNo}: name required`);         return; }
 
+      // ---- date: MM/DD/YYYY or YYYY-MM-DD ----
       let dateVal = null;
       const raw = obj.date;
       if (raw) {
-        if (/^\d{4}-\d{2}-\d{2}/.test(raw)) dateVal = raw.slice(0, 10);
-        else if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(raw)) {
+        if (/^\d{4}-\d{2}-\d{2}/.test(raw)) {
+          dateVal = raw.slice(0, 10);
+        } else if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(raw)) {
           const [mm, dd, yyyy] = raw.split('/');
           dateVal = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
         }
@@ -770,15 +784,18 @@ exports.uploadParticipants = async (req, res) => {
 
       rows.push({
         project_name: project,
+        level:        obj.level       || null,       // ← NEW
         mpin,
         name,
-        role:        obj.role        || null,
-        region:      obj.region      || null,
-        zone:        obj.zone        || null,
-        city:        obj.city        || null,
-        dealer_name: obj.dealer_name || null,
-        dealer_code: obj.dealer_code || null,
-        date:        dateVal,
+        role:         obj.role        || null,
+        region:       obj.region      || null,
+        zone:         obj.zone        || null,
+        city:         obj.city        || null,
+        dealer_name:  obj.dealer_name || null,
+        dealer_code:  obj.dealer_code || null,
+        date:         dateVal,
+        time_from:    parseSlotTime(obj.time_from),  // ← NEW
+        time_to:      parseSlotTime(obj.time_to),    // ← NEW
       });
     });
 
@@ -792,7 +809,7 @@ exports.uploadParticipants = async (req, res) => {
     if (rows.length === 0)
       return res.status(400).json({ success: false, error: 'Excel has no data rows' });
 
-    // ---- check which mpins already exist ----
+    // ---- split into insert vs update by mpin ----
     const mpins = rows.map(r => r.mpin);
     const [existing] = await pool.query(
       `SELECT mpin FROM participants WHERE mpin IN (?)`,
@@ -803,55 +820,60 @@ exports.uploadParticipants = async (req, res) => {
     const toInsert = rows.filter(r => !existingSet.has(r.mpin));
     const toUpdate = rows.filter(r =>  existingSet.has(r.mpin));
 
-    // ---- INSERT new rows ----
+    // ---- INSERT ----
     let insertedCount = 0;
     if (toInsert.length > 0) {
       const insertValues = toInsert.map(r => [
-        r.project_name, r.mpin, r.name, r.role, r.region,
+        r.project_name, r.level, r.mpin, r.name, r.role, r.region,
         r.zone, r.city, r.dealer_name, r.dealer_code, r.date,
+        r.time_from, r.time_to,
       ]);
-
       const [insRes] = await pool.query(
         `INSERT INTO participants
-           (project_name, mpin, name, role, region, zone,
-            city, dealer_name, dealer_code, date)
+           (project_name, level, mpin, name, role, region, zone,
+            city, dealer_name, dealer_code, date,
+            time_from, time_to)
          VALUES ?`,
         [insertValues]
       );
       insertedCount = insRes.affectedRows;
     }
 
-    // ---- UPDATE existing rows ----
+    // ---- UPDATE ----
     let updatedCount = 0;
-    if (toUpdate.length > 0) {
-      for (const r of toUpdate) {
-        const [updRes] = await pool.query(
-          `UPDATE participants SET
-             project_name = ?,
-             name         = ?,
-             role         = ?,
-             region       = ?,
-             zone         = ?,
-             city         = ?,
-             dealer_name  = ?,
-             dealer_code  = ?,
-             date         = ?
-           WHERE mpin = ?`,
-          [
-            r.project_name,
-            r.name,
-            r.role,
-            r.region,
-            r.zone,
-            r.city,
-            r.dealer_name,
-            r.dealer_code,
-            r.date,
-            r.mpin,
-          ]
-        );
-        updatedCount += updRes.affectedRows;
-      }
+    for (const r of toUpdate) {
+      const [updRes] = await pool.query(
+        `UPDATE participants SET
+           project_name = ?,
+           level        = ?,
+           name         = ?,
+           role         = ?,
+           region       = ?,
+           zone         = ?,
+           city         = ?,
+           dealer_name  = ?,
+           dealer_code  = ?,
+           date         = ?,
+           time_from    = ?,
+           time_to      = ?
+         WHERE mpin = ?`,
+        [
+          r.project_name,
+          r.level,
+          r.name,
+          r.role,
+          r.region,
+          r.zone,
+          r.city,
+          r.dealer_name,
+          r.dealer_code,
+          r.date,
+          r.time_from,
+          r.time_to,
+          r.mpin,
+        ]
+      );
+      updatedCount += updRes.affectedRows;
     }
 
     res.json({
@@ -875,15 +897,18 @@ exports.downloadParticipantTemplate = async (_req, res) => {
 
     ws.columns = [
       { header: 'project_name', key: 'project_name', width: 18 },
+      { header: 'level',        key: 'level',        width: 10 },   // ← NEW
       { header: 'mpin',         key: 'mpin',         width: 18 },
       { header: 'name',         key: 'name',         width: 26 },
-      { header: 'role',         key: 'role',         width: 14 },
+      { header: 'role',         key: 'role',         width: 16 },
       { header: 'region',       key: 'region',       width: 12 },
       { header: 'zone',         key: 'zone',         width: 14 },
       { header: 'city',         key: 'city',         width: 16 },
-      { header: 'dealer_name',  key: 'dealer_name',  width: 26 },
+      { header: 'dealer_name',  key: 'dealer_name',  width: 30 },
       { header: 'dealer_code',  key: 'dealer_code',  width: 14 },
       { header: 'date',         key: 'date',         width: 14 },
+      { header: 'time_from',    key: 'time_from',    width: 12 },   // ← NEW
+      { header: 'time_to',      key: 'time_to',      width: 12 },   // ← NEW
     ];
 
     const header = ws.getRow(1);
@@ -902,27 +927,33 @@ exports.downloadParticipantTemplate = async (_req, res) => {
 
     ws.addRow({
       project_name: 'Arena L1',
-      mpin:         'U056',
-      name:         'KARTHIK RAJ',
-      role:         'RM',
-      region:       'S1',
-      zone:         'South',
-      city:         'Bengaluru',
-      dealer_name:  'PREM MOTORS PVT. LTD.',
-      dealer_code:  '08D4-08',
-      date:         '10/24/2026',
+      level:        'L1',
+      mpin:         '1461374',
+      name:         'RAJESH THAKUR',
+      role:         'Sales Expert',
+      region:       'C1',
+      zone:         'C1',
+      city:         'DELHI',
+      dealer_name:  'AAA VEHICLEADES PVT LTD',
+      dealer_code:  '08B4-08',
+      date:         '9/18/2026',
+      time_from:    '9:30 AM',
+      time_to:      '9:50 AM',
     });
     ws.addRow({
       project_name: 'Arena L1',
-      mpin:         'U057',
-      name:         'SWATHI NAYAK',
-      role:         'SRM',
-      region:       'S1',
-      zone:         'South',
-      city:         'Bengaluru',
-      dealer_name:  'PREM MOTORS PVT. LTD.',
-      dealer_code:  '08D4-08',
-      date:         '10/24/2026',
+      level:        'L1',
+      mpin:         '1461375',
+      name:         'AMAR KUMAR',
+      role:         'Sales Expert',
+      region:       'C1',
+      zone:         'C1',
+      city:         'DELHI',
+      dealer_name:  'AAA VEHICLEADES PVT LTD',
+      dealer_code:  '08B4-08',
+      date:         '9/18/2026',
+      time_from:    '9:50 AM',
+      time_to:      '10:10 AM',
     });
 
     res.setHeader(
