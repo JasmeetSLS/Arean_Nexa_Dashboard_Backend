@@ -719,35 +719,52 @@ exports.addProject = async (req, res) => {
 
 exports.uploadParticipants = async (req, res) => {
   try {
-    if (!req.file)
-      return res.status(400).json({ success: false, error: 'Excel file is required' });
+    if (!req.file) return res.status(400).json({ success: false, error: 'Excel file required' });
 
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(req.file.buffer);
-
     const ws = wb.worksheets[0];
-    if (!ws)
-      return res.status(400).json({ success: false, error: 'No worksheet found' });
+    if (!ws) return res.status(400).json({ success: false, error: 'No worksheet' });
 
-    // ---- read headers (row 1), trim + lowercase ----
     const headers = [];
     ws.getRow(1).eachCell((cell, col) => {
       headers[col] = String(cell.value || '').trim().toLowerCase();
     });
 
-    const rows   = [];
-    const errors = [];
+    const pad = (n) => String(n).padStart(2, '0');
 
-    // ---- normalize "9:30 AM" → "09:30 AM" ----
-    const parseSlotTime = (v) => {
-      if (!v) return null;
+    const fmtTime = (v) => {
+      if (v == null || v === '') return null;
+      if (v instanceof Date && !isNaN(v)) {
+        let h = v.getUTCHours(), m = v.getUTCMinutes();
+        const ap = h >= 12 ? 'PM' : 'AM';
+        h = h % 12 || 12;
+        return `${pad(h)}:${pad(m)} ${ap}`;
+      }
       const s = String(v).trim().toUpperCase().replace(/\s+/g, ' ');
       const m = s.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/);
       if (!m) return null;
-      const [, h, mm, ap] = m;
-      return `${h.padStart(2, '0')}:${mm} ${ap}`;
+      let h = Number(m[1]) % 12;
+      if (m[3] === 'PM') h += 12;
+      return `${pad(h)}:${m[2]} ${m[3]}`;
     };
 
+    const fmtDate = (v) => {
+      if (v == null || v === '') return null;
+      if (v instanceof Date && !isNaN(v)) return v.toISOString().slice(0, 10);
+      const s = String(v).trim();
+      let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+      m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+      if (m) {
+        let y = m[3];
+        if (y.length === 2) y = Number(y) > 50 ? `19${y}` : `20${y}`;
+        return `${y}-${pad(m[1])}-${pad(m[2])}`;
+      }
+      return null;
+    };
+
+    const rows = [];
     ws.eachRow((row, rowNo) => {
       if (rowNo === 1) return;
 
@@ -755,213 +772,114 @@ exports.uploadParticipants = async (req, res) => {
       headers.forEach((h, col) => {
         if (!h) return;
         let v = row.getCell(col).value;
-        if (v instanceof Date) v = v.toISOString().slice(0, 10);
-        obj[h] = v == null ? '' : String(v).trim();
+        if (v && typeof v === 'object' && 'result' in v) v = v.result;
+        obj[h] = v;
       });
 
-      // skip fully empty rows
-      if (Object.values(obj).every(v => !v)) return;
+      if (!obj.mpin && !obj.name && !obj.project_name) return;
 
-      const project = obj.project_name;
-      const mpin    = obj.mpin;
-      const name    = obj.name;
-
-      if (!project) { errors.push(`Row ${rowNo}: project_name required`); return; }
-      if (!mpin)    { errors.push(`Row ${rowNo}: mpin required`);         return; }
-      if (!name)    { errors.push(`Row ${rowNo}: name required`);         return; }
-
-      // ---- date: MM/DD/YYYY or YYYY-MM-DD ----
-      let dateVal = null;
-      const raw = obj.date;
-      if (raw) {
-        if (/^\d{4}-\d{2}-\d{2}/.test(raw)) {
-          dateVal = raw.slice(0, 10);
-        } else if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(raw)) {
-          const [mm, dd, yyyy] = raw.split('/');
-          dateVal = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
-        }
-      }
-
-      rows.push({
-        project_name: project,
-        level:        obj.level       || null,       // ← NEW
-        mpin,
-        name,
-        role:         obj.role        || null,
-        region:       obj.region      || null,
-        zone:         obj.zone        || null,
-        city:         obj.city        || null,
-        dealer_name:  obj.dealer_name || null,
-        dealer_code:  obj.dealer_code || null,
-        date:         dateVal,
-        time_from:    parseSlotTime(obj.time_from),  // ← NEW
-        time_to:      parseSlotTime(obj.time_to),    // ← NEW
-      });
-    });
-
-    if (errors.length > 0)
-      return res.status(400).json({
-        success: false,
-        error: errors.slice(0, 5).join('; '),
-        errors,
-      });
-
-    if (rows.length === 0)
-      return res.status(400).json({ success: false, error: 'Excel has no data rows' });
-
-    // ---- split into insert vs update by mpin ----
-    const mpins = rows.map(r => r.mpin);
-    const [existing] = await pool.query(
-      `SELECT mpin FROM participants WHERE mpin IN (?)`,
-      [mpins]
-    );
-    const existingSet = new Set(existing.map(r => r.mpin));
-
-    const toInsert = rows.filter(r => !existingSet.has(r.mpin));
-    const toUpdate = rows.filter(r =>  existingSet.has(r.mpin));
-
-    // ---- INSERT ----
-    let insertedCount = 0;
-    if (toInsert.length > 0) {
-      const insertValues = toInsert.map(r => [
-        r.project_name, r.level, r.mpin, r.name, r.role, r.region,
-        r.zone, r.city, r.dealer_name, r.dealer_code, r.date,
-        r.time_from, r.time_to,
+      rows.push([
+        obj.project_name ? String(obj.project_name).trim() : null,
+        obj.level        ? String(obj.level).trim()        : null,
+        String(obj.mpin || '').trim(),
+        obj.name         ? String(obj.name).trim()         : null,
+        obj.role         ? String(obj.role).trim()         : null,
+        obj.region       ? String(obj.region).trim()       : null,
+        obj.zone         ? String(obj.zone).trim()         : null,
+        obj.city         ? String(obj.city).trim()         : null,
+        obj.dealer_name  ? String(obj.dealer_name).trim()  : null,
+        obj.dealer_code  ? String(obj.dealer_code).trim()  : null,
+        obj.channel      ? String(obj.channel).trim()      : null,   // ← NEW
+        fmtDate(obj.date),
+        fmtTime(obj.time_from),
+        fmtTime(obj.time_to),
       ]);
-      const [insRes] = await pool.query(
-        `INSERT INTO participants
-           (project_name, level, mpin, name, role, region, zone,
-            city, dealer_name, dealer_code, date,
-            time_from, time_to)
-         VALUES ?`,
-        [insertValues]
-      );
-      insertedCount = insRes.affectedRows;
-    }
-
-    // ---- UPDATE ----
-    let updatedCount = 0;
-    for (const r of toUpdate) {
-      const [updRes] = await pool.query(
-        `UPDATE participants SET
-           project_name = ?,
-           level        = ?,
-           name         = ?,
-           role         = ?,
-           region       = ?,
-           zone         = ?,
-           city         = ?,
-           dealer_name  = ?,
-           dealer_code  = ?,
-           date         = ?,
-           time_from    = ?,
-           time_to      = ?
-         WHERE mpin = ?`,
-        [
-          r.project_name,
-          r.level,
-          r.name,
-          r.role,
-          r.region,
-          r.zone,
-          r.city,
-          r.dealer_name,
-          r.dealer_code,
-          r.date,
-          r.time_from,
-          r.time_to,
-          r.mpin,
-        ]
-      );
-      updatedCount += updRes.affectedRows;
-    }
-
-    res.json({
-      success: true,
-      inserted: insertedCount,
-      updated:  updatedCount,
-      total:    rows.length,
     });
+
+    if (!rows.length) return res.status(400).json({ success: false, error: 'No data rows' });
+
+    const [result] = await pool.query(
+      `INSERT INTO participants
+        (project_name, level, mpin, name, role, region, zone, city,
+         dealer_name, dealer_code, channel, date, time_from, time_to)
+       VALUES ?
+       ON DUPLICATE KEY UPDATE
+         project_name = VALUES(project_name),
+         level        = VALUES(level),
+         name         = VALUES(name),
+         role         = VALUES(role),
+         region       = VALUES(region),
+         zone         = VALUES(zone),
+         city         = VALUES(city),
+         dealer_name  = VALUES(dealer_name),
+         dealer_code  = VALUES(dealer_code),
+         channel      = VALUES(channel),
+         date         = VALUES(date),
+         time_from    = VALUES(time_from),
+         time_to      = VALUES(time_to)`,
+      [rows]
+    );
+
+    res.json({ success: true, total: rows.length, affected: result.affectedRows });
   } catch (err) {
     console.error('[uploadParticipants]', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };
-
-exports.downloadParticipantTemplate = async (_req, res) => {
+exports.downloadParticipantTemplate = async (req, res) => {
   try {
     const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet('Participants', {
-      views: [{ state: 'frozen', ySplit: 1 }],
-    });
+    const ws = wb.addWorksheet('Participants');
 
     ws.columns = [
       { header: 'project_name', key: 'project_name', width: 18 },
-      { header: 'level',        key: 'level',        width: 10 },   // ← NEW
-      { header: 'mpin',         key: 'mpin',         width: 18 },
-      { header: 'name',         key: 'name',         width: 26 },
-      { header: 'role',         key: 'role',         width: 16 },
-      { header: 'region',       key: 'region',       width: 12 },
-      { header: 'zone',         key: 'zone',         width: 14 },
-      { header: 'city',         key: 'city',         width: 16 },
+      { header: 'level',        key: 'level',        width: 10 },
+      { header: 'mpin',         key: 'mpin',         width: 14 },
+      { header: 'name',         key: 'name',         width: 22 },
+      { header: 'role',         key: 'role',         width: 18 },
+      { header: 'region',       key: 'region',       width: 10 },
+      { header: 'zone',         key: 'zone',         width: 10 },
+      { header: 'city',         key: 'city',         width: 14 },
       { header: 'dealer_name',  key: 'dealer_name',  width: 30 },
       { header: 'dealer_code',  key: 'dealer_code',  width: 14 },
-      { header: 'date',         key: 'date',         width: 14 },
-      { header: 'time_from',    key: 'time_from',    width: 12 },   // ← NEW
-      { header: 'time_to',      key: 'time_to',      width: 12 },   // ← NEW
+      { header: 'channel',      key: 'channel',      width: 14 },  // ← NEW
+      { header: 'date',         key: 'date',         width: 12 },
+      { header: 'time_from',    key: 'time_from',    width: 12 },
+      { header: 'time_to',      key: 'time_to',      width: 12 },
     ];
 
-    const header = ws.getRow(1);
-    header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-    header.alignment = { vertical: 'middle', horizontal: 'center' };
-    header.height = 24;
-    header.eachCell((cell) => {
-      cell.fill   = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4C1D95' } };
-      cell.border = {
-        top:    { style: 'thin', color: { argb: 'FFE5E7EB' } },
-        left:   { style: 'thin', color: { argb: 'FFE5E7EB' } },
-        bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
-        right:  { style: 'thin', color: { argb: 'FFE5E7EB' } },
-      };
-    });
+    ws.getRow(1).font = { bold: true };
+    ws.getRow(1).fill = {
+      type: 'pattern', pattern: 'solid',
+      fgColor: { argb: 'FFDBEAFE' },
+    };
 
+    // sample row so users see the format
     ws.addRow({
       project_name: 'Arena L1',
-      level:        'L1',
-      mpin:         '1461374',
-      name:         'RAJESH THAKUR',
-      role:         'Sales Expert',
-      region:       'C1',
-      zone:         'C1',
-      city:         'DELHI',
-      dealer_name:  'AAA VEHICLEADES PVT LTD',
-      dealer_code:  '08B4-08',
-      date:         '9/18/2026',
-      time_from:    '9:30 AM',
-      time_to:      '9:50 AM',
-    });
-    ws.addRow({
-      project_name: 'Arena L1',
-      level:        'L1',
-      mpin:         '1461375',
-      name:         'AMAR KUMAR',
-      role:         'Sales Expert',
-      region:       'C1',
-      zone:         'C1',
-      city:         'DELHI',
-      dealer_name:  'AAA VEHICLEADES PVT LTD',
-      dealer_code:  '08B4-08',
-      date:         '9/18/2026',
-      time_from:    '9:50 AM',
-      time_to:      '10:10 AM',
+      level: 'L1',
+      mpin: '1461374',
+      name: 'RAJESH THAKUR',
+      role: 'Sales Expert',
+      region: 'C1',
+      zone: 'C1',
+      city: 'DELHI',
+      dealer_name: 'AAA VEHICLEADES PVT LTD',
+      dealer_code: '08B4-08',
+      channel: 'Retail',          // ← sample
+      date: '2026-09-18',
+      time_from: '09:30 AM',
+      time_to: '09:50 AM',
     });
 
     res.setHeader(
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     );
-    res.setHeader('Content-Disposition', 'attachment; filename="participants_template.xlsx"');
-
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename=participants_template.xlsx'
+    );
     await wb.xlsx.write(res);
     res.end();
   } catch (err) {
