@@ -10,7 +10,6 @@ exports.exportArenaMorning = async (req, res) => {
     }
 
     // 1. Fetch Data
-    // ORDER BY STR_TO_DATE ensures chronological order (9:00 AM comes before 9:30 AM)
     const [rows] = await pool.query(
       `SELECT
           ROW_NUMBER() OVER (ORDER BY STR_TO_DATE(p.time_from, '%h:%i %p'), p.mpin) AS sno,
@@ -30,7 +29,7 @@ exports.exportArenaMorning = async (req, res) => {
           CASE WHEN d.status = 'Pass' THEN 'Yes' ELSE 'No' END AS certified_status
         FROM participants p
         LEFT JOIN dashboard d ON d.mpin = p.mpin
-        LEFT JOIN trainers t ON t.username = d.trainer_id
+        LEFT JOIN trainers t ON t.username = p.trainer_id  -- CHANGED TO p.trainer_id
        WHERE p.project_name = ? AND p.date = ?
        ORDER BY STR_TO_DATE(p.time_from, '%h:%i %p'), p.mpin`,
       [project, date]
@@ -40,11 +39,9 @@ exports.exportArenaMorning = async (req, res) => {
       return res.status(404).json({ success: false, error: 'No data found' });
     }
 
-    // Dynamically get all unique roles
     const roles = [...new Set(rows.map(r => r.eligible).filter(Boolean))].sort();
     const numRoles = roles.length;
 
-    // --- DYNAMIC SLOT COLORS ---
     const slotColors = [
       'FFF4B084', 'FFC6E0B4', 'FFBDD7EE', 'FFFFE699', 
       'FFD9D2E9', 'FFF8CBAD', 'FFB4C6E7', 'FFE2EFDA'
@@ -57,9 +54,7 @@ exports.exportArenaMorning = async (req, res) => {
 
     const wb = new ExcelJS.Workbook();
 
-    // ==========================================
     // SHEET 1: SUMMARY
-    // ==========================================
     const wsSummary = wb.addWorksheet('Summary');
 
     const header1 = [
@@ -85,7 +80,6 @@ exports.exportArenaMorning = async (req, res) => {
     wsSummary.addRow(header1);
     wsSummary.addRow(header2);
 
-    // Merge Header Cells
     wsSummary.mergeCells('A1:A2');
     wsSummary.mergeCells('B1:B2');
     
@@ -94,24 +88,21 @@ exports.exportArenaMorning = async (req, res) => {
     wsSummary.mergeCells(1, col, 1, col + numRoles); col += numRoles + 1; 
     wsSummary.mergeCells(1, col, 1, col + numRoles); col += numRoles + 1; 
     wsSummary.mergeCells(1, col, 1, col + numRoles); col += numRoles + 1; 
-    
     wsSummary.mergeCells(1, col, 2, col); col += 1; 
     wsSummary.mergeCells(1, col, 2, col); col += 1; 
     wsSummary.mergeCells(1, col, 1, col + numRoles); 
 
-    // Header Styling (Gray Color)
     [1, 2].forEach(rowNum => {
       const r = wsSummary.getRow(rowNum);
       r.height = 35; 
       r.eachCell({ includeEmpty: true }, (cell) => {
         cell.font = { bold: true, size: 11, color: { argb: 'FF000000' } };
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } }; // GRAY HEADER
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
         cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
         cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
       });
     });
 
-    // Build Data Rows
     const regions = [...new Set(rows.map(r => r.region))].sort();
     let gtMapped = Array(numRoles).fill(0), gtMappedT = 0;
     let gtExp = Array(numRoles).fill(0), gtExpT = 0;
@@ -150,7 +141,6 @@ exports.exportArenaMorning = async (req, res) => {
       ]);
     });
 
-    // Grand Total Row
     summaryRows.push([
       'Grand Total', '',
       ...gtMapped, gtMappedT,
@@ -162,7 +152,6 @@ exports.exportArenaMorning = async (req, res) => {
       ...gtApp.map((app, i) => app > 0 ? gtCert[i] / app : 0), gtAppT > 0 ? gtCertT / gtAppT : 0
     ]);
 
-    // Write Summary Data
     summaryRows.forEach((data, idx) => {
       const r = wsSummary.addRow(data);
       const isGrand = idx === summaryRows.length - 1;
@@ -177,9 +166,7 @@ exports.exportArenaMorning = async (req, res) => {
       });
     });
 
-    // ==========================================
     // SHEET 2: STATUS
-    // ==========================================
     const wsStatus = wb.addWorksheet('Status');
 
     wsStatus.columns = [
@@ -201,17 +188,15 @@ exports.exportArenaMorning = async (req, res) => {
       { header: 'Certified Status', key: 'certified_status', width: 18 },
     ];
 
-    // Header Styling (Gray Color)
     const hRow = wsStatus.getRow(1);
     hRow.height = 30; 
     hRow.eachCell((cell) => {
       cell.font = { bold: true, size: 11, color: { argb: 'FF000000' } };
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } }; // GRAY HEADER
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
       cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
       cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
     });
 
-    // Write Status Data with Slot Colors on Time Columns
     rows.forEach(r => {
       const row = wsStatus.addRow(r);
       const rowColor = slotColorMap[r.time_from] || 'FFFFFFFF';
@@ -220,7 +205,6 @@ exports.exportArenaMorning = async (req, res) => {
         cell.alignment = { vertical: 'middle', horizontal: 'center' };
         cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
 
-        // Apply color ONLY to Time From (12) and Time To (13)
         if (colNumber === 12 || colNumber === 13) {
           if (rowColor !== 'FFFFFFFF') {
             cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: rowColor } };
@@ -228,7 +212,6 @@ exports.exportArenaMorning = async (req, res) => {
         }
       });
 
-      // Left-align the longer text fields
       row.getCell('dealer_name').alignment = { vertical: 'middle', horizontal: 'left' };
       row.getCell('name').alignment = { vertical: 'middle', horizontal: 'left' };
 
@@ -237,7 +220,6 @@ exports.exportArenaMorning = async (req, res) => {
       row.getCell('time_to').numFmt = '@';
     });
 
-    // Send Response
     const safeProject = String(project).replace(/[^a-z0-9]+/gi, '_');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="Summary_${safeProject}_${date}.xlsx"`);
@@ -254,7 +236,7 @@ exports.exportArenaMorning = async (req, res) => {
 
 exports.exportArenaAttendance = async (req, res) => {
   try {
-    // 1. Fetch data with dynamic status based on current time vs time_to
+    // 1. Fetch Data
     const [rows] = await pool.query(
       `SELECT 
           p.level, p.region, p.mpin, p.dealer_code, p.city AS dealer_city, 
@@ -269,14 +251,14 @@ exports.exportArenaAttendance = async (req, res) => {
           END AS attendance_status
        FROM participants p
        LEFT JOIN dashboard d ON d.mpin = p.mpin
-       LEFT JOIN trainers t ON t.username = d.trainer_id
+       LEFT JOIN trainers t ON t.username = p.trainer_id
        WHERE p.project_name IN ('Arena L1', 'Arena L2')
        ORDER BY p.date DESC, STR_TO_DATE(p.time_from, '%h:%i %p'), p.mpin`
     );
 
     if (!rows.length) return res.status(404).json({ success: false, error: 'No data found' });
 
-    // 2. Time Slot Colors Map
+    // 2. Time Slot Colors
     const colors = ['FFF4B084', 'FFC6E0B4', 'FFBDD7EE', 'FFFFE699', 'FFD9D2E9', 'FFF8CBAD', 'FFB4C6E7', 'FFE2EFDA'];
     const uniqueSlots = [...new Set(rows.map(r => r.time_from))].filter(Boolean);
     const slotColorMap = {};
@@ -309,17 +291,17 @@ exports.exportArenaAttendance = async (req, res) => {
         { header: 'Attendance Status', key: 'attendance_status', width: 18 }
       ];
 
-      // --- HEADER STYLING ---
+      // Simple Gray Header
       const hRow = ws.getRow(1);
       hRow.height = 30;
       hRow.eachCell((cell) => {
         cell.font = { bold: true, color: { argb: 'FF000000' } };
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFB4C6E7' } }; // Light Blue Header
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } }; // GRAY COLOR
         cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
         cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
       });
 
-      // --- DATA ROWS ---
+      // Data Rows
       data.forEach((r, index) => {
         const row = ws.addRow({
           sno: index + 1,
@@ -329,17 +311,16 @@ exports.exportArenaAttendance = async (req, res) => {
 
         const rowColor = slotColorMap[r.time_from] || 'FFFFFFFF';
 
-        // Apply borders and alignment to the whole row
-        row.eachCell({ includeEmpty: true }, (cell) => {
+        // Apply borders, alignment, and colors in one loop
+        row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
           cell.alignment = { vertical: 'middle', horizontal: 'center' };
           cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
-        });
 
-        // Apply color ONLY to Time From and Time To columns
-        if (rowColor !== 'FFFFFFFF') {
-          row.getCell('time_from').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: rowColor } };
-          row.getCell('time_to').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: rowColor } };
-        }
+          // Apply color ONLY to Time From (14) and Time To (15)
+          if ((colNumber === 14 || colNumber === 15) && rowColor !== 'FFFFFFFF') {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: rowColor } };
+          }
+        });
 
         // Formatting
         row.getCell('date').numFmt = 'dd-mmm-yy';
@@ -364,7 +345,6 @@ exports.exportArenaAttendance = async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 };
-
 exports.exportArenaOverallResult = async (req, res) => {
   try {
     const { project } = req.query;
