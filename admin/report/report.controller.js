@@ -355,7 +355,6 @@ exports.exportArenaOverallResult = async (req, res) => {
 
     // --- 1. FETCH DATA SEPARATELY TO PREVENT DATA LOSS ---
     
-    // A. Fetch ALL Round 1 Data (This will capture your 6030 records)
     const [r1Data] = await pool.query(
       `SELECT region, role AS eligible, appeared_status AS r1_appeared 
        FROM round_1 
@@ -363,7 +362,6 @@ exports.exportArenaOverallResult = async (req, res) => {
       [project]
     );
 
-    // B. Fetch ALL Main Round Data (LEFT JOIN ensures we get all participants)
     const [mainData] = await pool.query(
       `SELECT p.region, p.role AS eligible, 
               IFNULL(d.marks, 0) AS main_round, 
@@ -375,11 +373,9 @@ exports.exportArenaOverallResult = async (req, res) => {
       [project]
     );
 
-    // C. Fetch Detailed Data for Status Sheet
     const [participants] = await pool.query(
-      `SELECT p.date AS p_date, 
-              IFNULL(r1.round_1_date, p.date) AS main_round_date,
-              IFNULL(r1.region, p.region) AS region, 
+      `SELECT p.date AS main_round_date,   -- CHANGED TO USE p.date directly
+              p.region AS region, 
               p.mpin, p.dealer_code, p.city AS dealer_city,
               p.dealer_name, p.name, p.role AS eligible, 
               r1.appeared_status AS r1_appeared,
@@ -390,7 +386,7 @@ exports.exportArenaOverallResult = async (req, res) => {
        LEFT JOIN round_1 r1 ON r1.mpin = p.mpin
        LEFT JOIN dashboard d ON d.mpin = p.mpin
        WHERE p.project_name = ?
-       ORDER BY p.date DESC, region, p.mpin`,
+       ORDER BY p.date DESC, p.region, p.mpin`,
       [project]
     );
 
@@ -400,7 +396,6 @@ exports.exportArenaOverallResult = async (req, res) => {
 
     const wb = new ExcelJS.Workbook();
     
-    // Extract all unique roles safely from both datasets
     const roles = [...new Set([...r1Data.map(r => r.eligible), ...mainData.map(r => r.eligible)].filter(Boolean))].sort();
     const numRoles = roles.length;
 
@@ -409,7 +404,6 @@ exports.exportArenaOverallResult = async (req, res) => {
     // ==========================================
     const wsSummary = wb.addWorksheet('Summary');
 
-    // Removed numbers from the headers here
     const header1 = [
       'REGION', 
       'Eligible (R1)', ...Array(numRoles).fill(''),
@@ -427,14 +421,12 @@ exports.exportArenaOverallResult = async (req, res) => {
     wsSummary.addRow(header1);
     wsSummary.addRow(header2);
 
-    // Merge Headers
     wsSummary.mergeCells('A1:A2');
     let col = 2;
     for(let i=0; i<5; i++) { wsSummary.mergeCells(1, col, 1, col + numRoles); col += numRoles + 1; }
     wsSummary.mergeCells(1, col, 2, col); col += 1;
     wsSummary.mergeCells(1, col, 2, col);
 
-    // Style Summary Headers (Single Gray Color)
     [1, 2].forEach(rowNum => {
       wsSummary.getRow(rowNum).eachCell({ includeEmpty: true }, (cell) => {
         cell.font = { bold: true, size: 10, color: { argb: 'FF000000' } };
@@ -444,7 +436,6 @@ exports.exportArenaOverallResult = async (req, res) => {
       });
     });
 
-    // Get unique regions from both datasets
     const regions = [...new Set([...r1Data.map(r => r.region), ...mainData.map(r => r.region)])].filter(Boolean).sort();
 
     let gt = Array(5).fill().map(() => Array(numRoles).fill(0));
@@ -456,15 +447,10 @@ exports.exportArenaOverallResult = async (req, res) => {
       const r1Rows = r1Data.filter(r => r.region === region);
       const mRows = mainData.filter(r => r.region === region);
 
-      // 1. Eligible (R1) - Total in round_1 table
       const eligR1 = roles.map(role => r1Rows.filter(r => r.eligible === role).length);
-      // 2. R1 Appeared - Appeared in round_1 table
       const appR1 = roles.map(role => r1Rows.filter(r => r.eligible === role && r.r1_appeared === 'Appeared').length);
-      // 3. Eligible Main Round - Total in participants table
       const eligMain = roles.map(role => mRows.filter(r => r.eligible === role).length);
-      // 4. Appeared Main Round - Completed or In Progress in dashboard
       const appMain = roles.map(role => mRows.filter(r => r.eligible === role && ['Completed', 'In Progress'].includes(r.main_round_status)).length);
-      // 5. Certified Main Round - Passed in dashboard
       const certMain = roles.map(role => mRows.filter(r => r.eligible === role && r.main_cert_status === 'Pass').length);
 
       const totEligR1 = eligR1.reduce((a, b) => a + b, 0);
@@ -490,7 +476,6 @@ exports.exportArenaOverallResult = async (req, res) => {
       ]);
     });
 
-    // Grand Total Row
     summaryRows.push([
       'Grand Total',
       ...gt[0], gtT[0],
@@ -502,7 +487,6 @@ exports.exportArenaOverallResult = async (req, res) => {
       gtT[0] > 0 ? gtT[4] / gtT[0] : 0
     ]);
 
-    // Write Summary Data
     summaryRows.forEach((data, idx) => {
       const r = wsSummary.addRow(data);
       const isGrand = idx === summaryRows.length - 1;
@@ -511,7 +495,6 @@ exports.exportArenaOverallResult = async (req, res) => {
         cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
         if (isGrand) cell.font = { bold: true };
         
-        // Apply % format to the last two columns
         if (colNum >= 2 + (numRoles + 1) * 5) {
           cell.numFmt = '0%';
         }
@@ -548,7 +531,6 @@ exports.exportArenaOverallResult = async (req, res) => {
     });
 
     participants.forEach((r, idx) => {
-      // Logic: If Not Appeared, empty the score and certified status
       const isAppeared = r.appeared_status === 'Appeared';
       const displayScore = isAppeared ? r.main_round : '';
       const displayCertified = isAppeared ? r.certified_status : '';
@@ -571,7 +553,6 @@ exports.exportArenaOverallResult = async (req, res) => {
       row.getCell('name').alignment = { vertical: 'middle', horizontal: 'left' };
     });
 
-    // 3. Send Response
     const safeProject = String(project).replace(/[^a-z0-9]+/gi, '_');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="Arena_Overall_Result_${safeProject}.xlsx"`);
@@ -595,8 +576,6 @@ exports.exportArenaWinnerSummary = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Project query parameter is required' });
     }
 
-    // --- 1. FETCH DATA SEPARATELY FOR ACCURATE SUMMARY ---
-    
     const [r1Data] = await pool.query(
       `SELECT region, role AS eligible, appeared_status AS r1_appeared 
        FROM round_1 
@@ -616,8 +595,7 @@ exports.exportArenaWinnerSummary = async (req, res) => {
 
     const [winnerData] = await pool.query(
       `SELECT 
-          p.date AS p_date,
-          IFNULL(r1.round_1_date, p.date) AS main_round_date,
+          p.date AS main_round_date,   -- CHANGED TO USE p.date directly
           p.region, p.mpin, p.dealer_code, p.city AS dealer_city,
           p.dealer_name, p.name, p.role AS eligible,
           r1.category_score, r1.total_r1,
@@ -658,8 +636,6 @@ exports.exportArenaWinnerSummary = async (req, res) => {
       return idxA - idxB;
     });
 
-    // --- 2. PREPARE, SORT, AND RANK WINNER DATA ---
-    
     const parsedWinnerData = winnerData.map(r => {
       const isAppeared = ['Completed', 'In Progress'].includes(r.main_round_status);
       let scoreObj = {};
@@ -681,7 +657,6 @@ exports.exportArenaWinnerSummary = async (req, res) => {
       return row;
     });
 
-    // Sort Logic: Region -> Role -> Appeared First -> Main Round Score -> Total R1 -> Categories...
     parsedWinnerData.sort((a, b) => {
       if (a.region !== b.region) return a.region.localeCompare(b.region);
       if (a.eligible !== b.eligible) return a.eligible.localeCompare(b.eligible);
@@ -698,7 +673,6 @@ exports.exportArenaWinnerSummary = async (req, res) => {
       return 0;
     });
 
-    // --- FIXED RANKING LOGIC ---
     let currentTier = 1;
     let lastRow = null;
 
@@ -708,11 +682,9 @@ exports.exportArenaWinnerSummary = async (req, res) => {
         return;
       }
 
-      // Reset ranking logic for new Region or Role
       if (!lastRow || lastRow.region !== row.region || lastRow.eligible !== row.eligible) {
         currentTier = 1;
       } else {
-        // Check if exact tie
         let isTie = true;
         if (lastRow.main_round !== row.main_round) isTie = false;
         else if (lastRow.total_r1 !== row.total_r1) isTie = false;
@@ -725,13 +697,11 @@ exports.exportArenaWinnerSummary = async (req, res) => {
           }
         }
 
-        // If the score is NOT a tie, we move to the next rank tier (1 -> 2 -> 3 -> 4)
         if (!isTie) {
           currentTier++;
         }
       }
       
-      // Output the tier if it's 1, 2, or 3. Else leave blank.
       row.Rank = currentTier <= 3 ? currentTier : '';
       lastRow = row;
     });
@@ -876,7 +846,6 @@ exports.exportArenaWinnerSummary = async (req, res) => {
       row.getCell('name').alignment = { vertical: 'middle', horizontal: 'left' };
     });
 
-    // Send Response
     const safeProject = String(project).replace(/[^a-z0-9]+/gi, '_');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="Winner_Summary_${safeProject}.xlsx"`);
