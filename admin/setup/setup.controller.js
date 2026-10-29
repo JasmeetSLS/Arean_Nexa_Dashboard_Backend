@@ -657,6 +657,7 @@ exports.getProjects = async (_req, res) => {
               rounds,
               total_score        AS totalScore,
               passing_percentage AS passingPercentage,
+              TIME_FORMAT(trainer_time, '%H:%i:%s') AS trainerTime, -- Format as HH:MM:SS string
               trainer_time_secs  AS trainerTimeSecs,
               status,
               created_at         AS createdAt
@@ -694,17 +695,26 @@ exports.addProject = async (req, res) => {
     const totalRounds = cleaned.length;
     const totalScore  = cleaned.reduce((a, r) => a + r.score, 0);
 
+    // --- NEW: Convert seconds (1800) to HH:MM:SS (00:30:00) ---
+    const pad = (num) => String(num).padStart(2, '0');
+    const h = Math.floor(trainerTimeSecs / 3600);
+    const m = Math.floor((trainerTimeSecs % 3600) / 60);
+    const s = trainerTimeSecs % 60;
+    const trainerTimeStr = `${pad(h)}:${pad(m)}:${pad(s)}`;
+    // ----------------------------------------------------------
+
     const [result] = await pool.query(
       `INSERT INTO project_round_config
          (project_name, total_rounds, rounds, total_score,
-          passing_percentage, trainer_time_secs, status)
-       VALUES (?, ?, ?, ?, ?, ?, 'active')`,
+          passing_percentage, trainer_time, trainer_time_secs, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`, // Added trainer_time here
       [
         projectName.trim(),
         totalRounds,
         JSON.stringify(cleaned),
         totalScore,
         passingPercentage,
+        trainerTimeStr, // <-- Passing the formatted string "00:30:00"
         trainerTimeSecs,
       ]
     );

@@ -1233,54 +1233,79 @@ exports.importRound1 = async (req, res) => {
         result = null; 
       }
 
-      let category_score = null;
-      
-      // 🔥 FIX IS HERE: Default to NULL instead of 0
-      let total_r1 = null; 
+      const rawTotalR1 = getValue('Total-R1');
+      let total_r1 = null;
+      if (rawTotalR1 !== null && rawTotalR1 !== '') {
+        total_r1 = Number(rawTotalR1);
+      }
 
-      if (appeared_status === 'Appeared') {
+      let category_score = null;
+      if (appeared_status === 'Appeared' && dynamicCategories.length > 0) {
         const scoreObj = {};
-        let calculatedTotal = 0; // Local variable to calculate the sum
-        
         dynamicCategories.forEach(cat => {
           const scoreVal = Number(row.getCell(cat.col).value) || 0;
           scoreObj[cat.name] = scoreVal;
-          calculatedTotal += scoreVal;
         });
-        
         category_score = JSON.stringify(scoreObj); 
-        total_r1 = calculatedTotal; // Assign the sum only if they appeared
       }
 
-      updates.push([mpin, project_name, level, region, dateVal, dealer_code, city, dealer_name, role, appeared_status, category_score, total_r1, result]);
+      updates.push({
+        mpin, project_name, level, region, dateVal, dealer_code, city, 
+        dealer_name, role, appeared_status, category_score, total_r1, result
+      });
     });
 
     if (updates.length === 0) {
       return res.status(400).json({ success: false, error: 'No valid data found' });
     }
 
-    const query = `
-      INSERT INTO round_1 
-        (mpin, project_name, level, region, round_1_date, dealer_code, city, dealer_name, role, appeared_status, category_score, total_r1, result)
-      VALUES ?
-      ON DUPLICATE KEY UPDATE
-        project_name = VALUES(project_name),
-        level = VALUES(level),
-        region = VALUES(region),
-        round_1_date = VALUES(round_1_date),
-        dealer_code = VALUES(dealer_code),
-        city = VALUES(city),
-        dealer_name = VALUES(dealer_name),
-        role = VALUES(role),
-        appeared_status = VALUES(appeared_status),
-        category_score = VALUES(category_score),
-        total_r1 = VALUES(total_r1),
-        result = VALUES(result)
-    `;
+    let insertedCount = 0;
+    let updatedCount = 0;
 
-    await pool.query(query, [updates]);
+    // Loop through records and check if they exist
+    for (const r of updates) {
+      const [existing] = await pool.query(
+        `SELECT mpin FROM round_1 WHERE mpin = ? LIMIT 1`,
+        [r.mpin]
+      );
 
-    res.json({ success: true, message: `Successfully imported ${updates.length} records.` });
+      if (existing.length > 0) {
+        // --- UPDATE ---
+        await pool.query(
+          `UPDATE round_1 SET
+             project_name = ?, level = ?, region = ?, round_1_date = ?,
+             dealer_code = ?, city = ?, dealer_name = ?, role = ?,
+             appeared_status = ?, category_score = ?, total_r1 = ?, result = ?
+           WHERE mpin = ?`,
+          [
+            r.project_name, r.level, r.region, r.dateVal, 
+            r.dealer_code, r.city, r.dealer_name, r.role, 
+            r.appeared_status, r.category_score, r.total_r1, r.result,
+            r.mpin
+          ]
+        );
+        updatedCount++;
+      } else {
+        // --- INSERT ---
+        await pool.query(
+          `INSERT INTO round_1 
+             (mpin, project_name, level, region, round_1_date, dealer_code, city, dealer_name, role, appeared_status, category_score, total_r1, result)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            r.mpin, r.project_name, r.level, r.region, r.dateVal, 
+            r.dealer_code, r.city, r.dealer_name, r.role, 
+            r.appeared_status, r.category_score, r.total_r1, r.result
+          ]
+        );
+        insertedCount++;
+      }
+    }
+
+    res.json({ 
+      success: true, 
+      message: `Import complete: ${insertedCount} inserted, ${updatedCount} updated.`,
+      total: updates.length
+    });
 
   } catch (err) {
     console.error('[importRound1]', err);
