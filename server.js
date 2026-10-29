@@ -10,6 +10,7 @@ app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 const authRoutes       = require('./auth/auth.routes');
+const reportRoutes       = require('./admin/report/report.routes');
 const setupRoutes      = require('./admin/setup/setup.routes');
 const permissionRoutes = require('./admin/permission/permission.routes');
 const chatRoutes       = require('./admin/chat/chat.routes');
@@ -17,6 +18,7 @@ const webhookRoutes    = require('./admin/webhook/webhook.routes');
 const requireAuth      = require('./middleware/auth');
 
 app.use('/api', authRoutes);
+app.use('/api', reportRoutes);
 app.use('/api', requireAuth, setupRoutes);
 app.use('/api', requireAuth, permissionRoutes);
 app.use('/api', requireAuth, chatRoutes);

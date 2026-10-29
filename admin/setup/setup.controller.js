@@ -717,6 +717,70 @@ exports.addProject = async (req, res) => {
   }
 };
 
+exports.downloadParticipantTemplate = async (req, res) => {
+  try {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Participants');
+
+    ws.columns = [
+      { header: 'project_name', key: 'project_name', width: 18 },
+      { header: 'level',        key: 'level',        width: 10 },
+      { header: 'mpin',         key: 'mpin',         width: 14 },
+      { header: 'name',         key: 'name',         width: 22 },
+      { header: 'role',         key: 'role',         width: 18 },
+      { header: 'region',       key: 'region',       width: 10 },
+      { header: 'zone',         key: 'zone',         width: 10 },
+      { header: 'city',         key: 'city',         width: 14 },
+      { header: 'dealer_name',  key: 'dealer_name',  width: 30 },
+      { header: 'dealer_code',  key: 'dealer_code',  width: 14 },
+      { header: 'channel',      key: 'channel',      width: 14 },
+      { header: 'trainer_id',   key: 'trainer_id',   width: 15 }, // <- NEW
+      { header: 'date',         key: 'date',         width: 12 },
+      { header: 'time_from',    key: 'time_from',    width: 12 },
+      { header: 'time_to',      key: 'time_to',      width: 12 },
+    ];
+
+    ws.getRow(1).font = { bold: true };
+    ws.getRow(1).fill = {
+      type: 'pattern', pattern: 'solid',
+      fgColor: { argb: 'FFDBEAFE' },
+    };
+
+    // sample row so users see the format
+    ws.addRow({
+      project_name: 'Arena L1',
+      level: 'L1',
+      mpin: '1461374',
+      name: 'RAJESH THAKUR',
+      role: 'Sales Expert',
+      region: 'C1',
+      zone: 'C1',
+      city: 'DELHI',
+      dealer_name: 'AAA VEHICLEADES PVT LTD',
+      dealer_code: '08B4-08',
+      channel: 'Retail',
+      trainer_id: 'slspooja', // <- NEW
+      date: '2026-09-18',
+      time_from: '09:30 AM',
+      time_to: '09:50 AM',
+    });
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename=participants_template.xlsx'
+    );
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error('[downloadParticipantTemplate]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 exports.uploadParticipants = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, error: 'Excel file required' });
@@ -789,7 +853,8 @@ exports.uploadParticipants = async (req, res) => {
         obj.city         ? String(obj.city).trim()         : null,
         obj.dealer_name  ? String(obj.dealer_name).trim()  : null,
         obj.dealer_code  ? String(obj.dealer_code).trim()  : null,
-        obj.channel      ? String(obj.channel).trim()      : null,   // ← NEW
+        obj.channel      ? String(obj.channel).trim()      : null,
+        obj.trainer_id   ? String(obj.trainer_id).trim()   : null, // <- NEW
         fmtDate(obj.date),
         fmtTime(obj.time_from),
         fmtTime(obj.time_to),
@@ -801,7 +866,7 @@ exports.uploadParticipants = async (req, res) => {
     const [result] = await pool.query(
       `INSERT INTO participants
         (project_name, level, mpin, name, role, region, zone, city,
-         dealer_name, dealer_code, channel, date, time_from, time_to)
+         dealer_name, dealer_code, channel, trainer_id, date, time_from, time_to)
        VALUES ?
        ON DUPLICATE KEY UPDATE
          project_name = VALUES(project_name),
@@ -814,6 +879,7 @@ exports.uploadParticipants = async (req, res) => {
          dealer_name  = VALUES(dealer_name),
          dealer_code  = VALUES(dealer_code),
          channel      = VALUES(channel),
+         trainer_id   = VALUES(trainer_id),    -- <- NEW
          date         = VALUES(date),
          time_from    = VALUES(time_from),
          time_to      = VALUES(time_to)`,
@@ -823,67 +889,6 @@ exports.uploadParticipants = async (req, res) => {
     res.json({ success: true, total: rows.length, affected: result.affectedRows });
   } catch (err) {
     console.error('[uploadParticipants]', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-};
-exports.downloadParticipantTemplate = async (req, res) => {
-  try {
-    const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet('Participants');
-
-    ws.columns = [
-      { header: 'project_name', key: 'project_name', width: 18 },
-      { header: 'level',        key: 'level',        width: 10 },
-      { header: 'mpin',         key: 'mpin',         width: 14 },
-      { header: 'name',         key: 'name',         width: 22 },
-      { header: 'role',         key: 'role',         width: 18 },
-      { header: 'region',       key: 'region',       width: 10 },
-      { header: 'zone',         key: 'zone',         width: 10 },
-      { header: 'city',         key: 'city',         width: 14 },
-      { header: 'dealer_name',  key: 'dealer_name',  width: 30 },
-      { header: 'dealer_code',  key: 'dealer_code',  width: 14 },
-      { header: 'channel',      key: 'channel',      width: 14 },  // ← NEW
-      { header: 'date',         key: 'date',         width: 12 },
-      { header: 'time_from',    key: 'time_from',    width: 12 },
-      { header: 'time_to',      key: 'time_to',      width: 12 },
-    ];
-
-    ws.getRow(1).font = { bold: true };
-    ws.getRow(1).fill = {
-      type: 'pattern', pattern: 'solid',
-      fgColor: { argb: 'FFDBEAFE' },
-    };
-
-    // sample row so users see the format
-    ws.addRow({
-      project_name: 'Arena L1',
-      level: 'L1',
-      mpin: '1461374',
-      name: 'RAJESH THAKUR',
-      role: 'Sales Expert',
-      region: 'C1',
-      zone: 'C1',
-      city: 'DELHI',
-      dealer_name: 'AAA VEHICLEADES PVT LTD',
-      dealer_code: '08B4-08',
-      channel: 'Retail',          // ← sample
-      date: '2026-09-18',
-      time_from: '09:30 AM',
-      time_to: '09:50 AM',
-    });
-
-    res.setHeader(
-      'Content-Type',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    );
-    res.setHeader(
-      'Content-Disposition',
-      'attachment; filename=participants_template.xlsx'
-    );
-    await wb.xlsx.write(res);
-    res.end();
-  } catch (err) {
-    console.error('[downloadParticipantTemplate]', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };
