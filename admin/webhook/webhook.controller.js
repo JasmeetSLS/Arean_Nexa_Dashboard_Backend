@@ -4,33 +4,31 @@ exports.saveRound = async (req, res) => {
   try {
     const { mpin, trainer_id, round_name, start_time, score, end_time } = req.body;
 
-    // 1. Update participant's date ONLY if it's different from start_time
-    if (start_time) {
+    // 1. Update participant date & trainer (Only runs if both are provided)
+    if (start_time && trainer_id) {
       await pool.query(
-        `UPDATE participants 
-            SET date = DATE(?) 
-          WHERE mpin = ? AND DATE(date) != DATE(?)`,
-        [start_time, mpin, start_time]
+        `UPDATE participants SET date = DATE(?), trainer_id = ? WHERE mpin = ?`,
+        [start_time, trainer_id, mpin]
       );
     }
 
     // 2. Check if the round already exists
     const [rows] = await pool.query(
-      `SELECT id FROM participant_rounds WHERE mpin = ? AND trainer_id = ? AND round_name = ? LIMIT 1`,
-      [mpin, trainer_id, round_name]
+      `SELECT id FROM participant_rounds WHERE mpin = ? AND round_name = ? LIMIT 1`,
+      [mpin, round_name]
     );
 
-    // 3. Update if exists, Insert if not
+    // 3. Insert or Update the round
     if (rows.length) {
       await pool.query(
-        `UPDATE participant_rounds SET score = ?, end_time = ? WHERE id = ?`,
-        [score ?? null, end_time ?? null, rows[0].id]
+        `UPDATE participant_rounds SET score = ?, end_time = ?, trainer_id = ? WHERE id = ?`,
+        [score ?? null, end_time ?? null, trainer_id, rows[0].id]
       );
       return res.json({ success: true, action: 'updated' });
     }
 
     await pool.query(
-      `INSERT INTO participant_rounds (mpin, trainer_id, round_name, start_time, score, end_time)
+      `INSERT INTO participant_rounds (mpin, trainer_id, round_name, start_time, score, end_time) 
        VALUES (?, ?, ?, ?, ?, ?)`,
       [mpin, trainer_id, round_name, start_time, score ?? null, end_time ?? null]
     );
