@@ -1375,7 +1375,6 @@ exports.downloadMainRoundTemplate = async (req, res) => {
   }
 };
 
-
 exports.importMainRoundRecords = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, error: 'Excel file required' });
@@ -1384,27 +1383,24 @@ exports.importMainRoundRecords = async (req, res) => {
     await wb.xlsx.load(req.file.buffer);
     const ws = wb.worksheets[0];
     
-    // Dynamically map headers
     const headerMap = {};
     ws.getRow(1).eachCell((cell, colNumber) => {
       if (cell.value) headerMap[String(cell.value).trim().toLowerCase()] = colNumber;
     });
 
     const roundsData = [];
-    const uniqueTrainers = new Map(); // To store { username: { name, agency } }
+    const uniqueTrainers = new Map(); 
+    const dateUpdates = new Set(); // <-- Short & Simple: Store "mpin|YYYY-MM-DD"
 
-    // Safe date formatter for Excel
     const formatDateTime = (val) => {
       if (!val) return null;
       let d = val instanceof Date ? val : new Date(val);
-      if (isNaN(d)) return String(val).trim(); // Fallback if it's already a string
-      
+      if (isNaN(d)) return String(val).trim(); 
       const pad = (num) => String(num).padStart(2, '0');
-      // Using UTC methods to avoid timezone shifting on Date objects
       return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
     };
 
-    // 1. Parse Excel Data
+    // 1. Parse Data
     ws.eachRow((row, rowNo) => {
       if (rowNo === 1) return;
 
@@ -1417,70 +1413,48 @@ exports.importMainRoundRecords = async (req, res) => {
       const round_name = String(getValue('Round Name') || '').trim();
       const trainer_id = String(getValue('Trainer Username') || '').trim();
       
-      if (!mpin || !round_name || !trainer_id) return; // Skip invalid rows
+      if (!mpin || !round_name || !trainer_id) return;
 
       const start_time = formatDateTime(getValue('Start Time'));
       const end_time = formatDateTime(getValue('End Time'));
-      
-      const rawScore = getValue('Score');
-      const score = (rawScore !== null && rawScore !== '') ? Number(rawScore) : null;
+      const score = (getValue('Score') !== null && getValue('Score') !== '') ? Number(getValue('Score')) : null;
 
-      // Add to rounds data
       roundsData.push([mpin, trainer_id, round_name, start_time, score, end_time]);
 
-      // Collect unique trainers for the trainers table
+      // --- NEW: Collect unique date updates safely ---
+      if (start_time) {
+        dateUpdates.add(`${mpin}|${start_time.slice(0, 10)}`);
+      }
+      // ------------------------------------------------
+
       if (!uniqueTrainers.has(trainer_id)) {
-        const tName = String(getValue('Trainer Name') || '').trim() || trainer_id; // Fallback to username if name is empty
+        const tName = String(getValue('Trainer Name') || '').trim() || trainer_id; 
         const tAgency = String(getValue('Agency') || '').trim() || null;
         uniqueTrainers.set(trainer_id, { name: tName, agency: tAgency });
       }
     });
 
-    if (roundsData.length === 0) {
-      return res.status(400).json({ success: false, error: 'No valid data found in Excel' });
+    if (roundsData.length === 0) return res.status(400).json({ success: false, error: 'No data' });
+
+    // 2. Insert/Update Trainers (Bulk)
+    const trainerValues = Array.from(uniqueTrainers.entries()).map(([u, i]) => [u, i.name, i.agency, 'active']);
+    if (trainerValues.length > 0) {
+      await pool.query(`INSERT IGNORE INTO trainers (username, name, agency, status) VALUES ?`, [trainerValues]);
     }
 
-    // 2. Check for existing trainers
-    const usernames = Array.from(uniqueTrainers.keys());
-    const [existingTrainers] = await pool.query(
-      `SELECT username FROM trainers WHERE username IN (?)`,
-      [usernames]
-    );
-    const existingUsernames = new Set(existingTrainers.map(t => t.username));
+    // 3. Insert Rounds (Bulk)
+    await pool.query(`INSERT INTO participant_rounds (mpin, trainer_id, round_name, start_time, score, end_time) VALUES ?`, [roundsData]);
 
-    // 3. Insert missing trainers into the database
-    const newTrainers = [];
-    uniqueTrainers.forEach((info, username) => {
-      if (!existingUsernames.has(username)) {
-        // Set password to null, status to active. 
-        // Base location and photo_url are omitted (they default to NULL).
-        newTrainers.push([username, info.name, info.agency, 'active']);
-      }
-    });
-
-    if (newTrainers.length > 0) {
-      const insertTrainerQuery = `
-        INSERT INTO trainers (username, name, agency, status) 
-        VALUES ?
-      `;
-      await pool.query(insertTrainerQuery, [newTrainers]);
+    // 4. Update Dates (Simple Loop)
+    for (const item of dateUpdates) {
+      const [m, d] = item.split('|');
+      await pool.query(`UPDATE participants SET date = ? WHERE mpin = ? AND DATE(date) != ?`, [d, m, d]);
     }
 
-    // 4. Insert rounds into participant_rounds
-    const insertRoundQuery = `
-      INSERT INTO participant_rounds 
-        (mpin, trainer_id, round_name, start_time, score, end_time)
-      VALUES ?
-    `;
-    await pool.query(insertRoundQuery, [roundsData]);
-
-    res.json({ 
-      success: true, 
-      message: `Imported ${roundsData.length} rounds. Added ${newTrainers.length} new trainers to the system.` 
-    });
+    res.json({ success: true, message: `Imported ${roundsData.length} rounds.` });
 
   } catch (err) {
-    console.error('[importParticipantRounds]', err);
+    console.error('[importMainRoundRecords]', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };
