@@ -744,11 +744,16 @@ exports.downloadParticipantTemplate = async (req, res) => {
       { header: 'dealer_name',  key: 'dealer_name',  width: 30 },
       { header: 'dealer_code',  key: 'dealer_code',  width: 14 },
       { header: 'channel',      key: 'channel',      width: 14 },
-      { header: 'trainer_id',   key: 'trainer_id',   width: 15 }, // <- NEW
-      { header: 'date',         key: 'date',         width: 12 },
+      { header: 'trainer_id',   key: 'trainer_id',   width: 15 },
+      { header: 'dob',          key: 'dob',          width: 15 }, // NEW
+      { header: 'date',         key: 'date',         width: 15 },
       { header: 'time_from',    key: 'time_from',    width: 12 },
       { header: 'time_to',      key: 'time_to',      width: 12 },
     ];
+
+    // --- FORCE DOB AND DATE COLUMNS TO YYYY-MM-DD FORMAT ---
+    ws.getColumn('dob').numFmt = 'yyyy-mm-dd';
+    ws.getColumn('date').numFmt = 'yyyy-mm-dd';
 
     ws.getRow(1).font = { bold: true };
     ws.getRow(1).fill = {
@@ -756,7 +761,7 @@ exports.downloadParticipantTemplate = async (req, res) => {
       fgColor: { argb: 'FFDBEAFE' },
     };
 
-    // sample row so users see the format
+    // Sample row
     ws.addRow({
       project_name: 'Arena L1',
       level: 'L1',
@@ -769,7 +774,8 @@ exports.downloadParticipantTemplate = async (req, res) => {
       dealer_name: 'AAA VEHICLEADES PVT LTD',
       dealer_code: '08B4-08',
       channel: 'Retail',
-      trainer_id: 'slspooja', // <- NEW
+      trainer_id: 'slspooja',
+      dob: '1990-01-01', // Sample DOB
       date: '2026-09-18',
       time_from: '09:30 AM',
       time_to: '09:50 AM',
@@ -852,51 +858,81 @@ exports.uploadParticipants = async (req, res) => {
 
       if (!obj.mpin && !obj.name && !obj.project_name) return;
 
-      rows.push([
-        obj.project_name ? String(obj.project_name).trim() : null,
-        obj.level        ? String(obj.level).trim()        : null,
-        String(obj.mpin || '').trim(),
-        obj.name         ? String(obj.name).trim()         : null,
-        obj.role         ? String(obj.role).trim()         : null,
-        obj.region       ? String(obj.region).trim()       : null,
-        obj.zone         ? String(obj.zone).trim()         : null,
-        obj.city         ? String(obj.city).trim()         : null,
-        obj.dealer_name  ? String(obj.dealer_name).trim()  : null,
-        obj.dealer_code  ? String(obj.dealer_code).trim()  : null,
-        obj.channel      ? String(obj.channel).trim()      : null,
-        obj.trainer_id   ? String(obj.trainer_id).trim()   : null, // <- NEW
-        fmtDate(obj.date),
-        fmtTime(obj.time_from),
-        fmtTime(obj.time_to),
-      ]);
+      rows.push({
+        project_name: obj.project_name ? String(obj.project_name).trim() : null,
+        level:        obj.level        ? String(obj.level).trim()        : null,
+        mpin:         String(obj.mpin || '').trim(),
+        name:         obj.name         ? String(obj.name).trim()         : null,
+        role:         obj.role         ? String(obj.role).trim()         : null,
+        region:       obj.region       ? String(obj.region).trim()       : null,
+        zone:         obj.zone         ? String(obj.zone).trim()         : null,
+        city:         obj.city         ? String(obj.city).trim()         : null,
+        dealer_name:  obj.dealer_name  ? String(obj.dealer_name).trim()  : null,
+        dealer_code:  obj.dealer_code  ? String(obj.dealer_code).trim()  : null,
+        channel:      obj.channel      ? String(obj.channel).trim()      : null,
+        trainer_id:   obj.trainer_id   ? String(obj.trainer_id).trim()   : null,
+        dob:          fmtDate(obj.dob),
+        date:         fmtDate(obj.date),
+        time_from:    fmtTime(obj.time_from),
+        time_to:      fmtTime(obj.time_to),
+      });
     });
 
     if (!rows.length) return res.status(400).json({ success: false, error: 'No data rows' });
 
-    const [result] = await pool.query(
-      `INSERT INTO participants
-        (project_name, level, mpin, name, role, region, zone, city,
-         dealer_name, dealer_code, channel, trainer_id, date, time_from, time_to)
-       VALUES ?
-       ON DUPLICATE KEY UPDATE
-         project_name = VALUES(project_name),
-         level        = VALUES(level),
-         name         = VALUES(name),
-         role         = VALUES(role),
-         region       = VALUES(region),
-         zone         = VALUES(zone),
-         city         = VALUES(city),
-         dealer_name  = VALUES(dealer_name),
-         dealer_code  = VALUES(dealer_code),
-         channel      = VALUES(channel),
-         trainer_id   = VALUES(trainer_id),    -- <- NEW
-         date         = VALUES(date),
-         time_from    = VALUES(time_from),
-         time_to      = VALUES(time_to)`,
-      [rows]
-    );
+    // 1. Find which MPINs already exist in the DB
+    const mpins = rows.map(r => r.mpin);
+    const [existing] = await pool.query(`SELECT mpin FROM participants WHERE mpin IN (?)`, [mpins]);
+    const existingSet = new Set(existing.map(r => r.mpin));
 
-    res.json({ success: true, total: rows.length, affected: result.affectedRows });
+    // 2. Split into Inserts and Updates
+    const toInsert = rows.filter(r => !existingSet.has(r.mpin));
+    const toUpdate = rows.filter(r => existingSet.has(r.mpin));
+
+    let insertedCount = 0;
+    let updatedCount = 0;
+
+    // 3. Process Inserts (Bulk Query)
+    if (toInsert.length > 0) {
+      const insertValues = toInsert.map(r => [
+        r.project_name, r.level, r.mpin, r.name, r.role, r.region, r.zone, r.city,
+        r.dealer_name, r.dealer_code, r.channel, r.trainer_id, r.dob, r.date, r.time_from, r.time_to
+      ]);
+
+      const [insRes] = await pool.query(
+        `INSERT INTO participants 
+          (project_name, level, mpin, name, role, region, zone, city, 
+           dealer_name, dealer_code, channel, trainer_id, dob, date, time_from, time_to)
+         VALUES ?`,
+        [insertValues]
+      );
+      insertedCount = insRes.affectedRows;
+    }
+
+    // 4. Process Updates (Loop)
+    if (toUpdate.length > 0) {
+      for (const r of toUpdate) {
+        const [updRes] = await pool.query(
+          `UPDATE participants SET
+             project_name = ?, level = ?, name = ?, role = ?, region = ?, zone = ?, city = ?,
+             dealer_name = ?, dealer_code = ?, channel = ?, trainer_id = ?, dob = ?, date = ?, time_from = ?, time_to = ?
+           WHERE mpin = ?`,
+          [
+            r.project_name, r.level, r.name, r.role, r.region, r.zone, r.city,
+            r.dealer_name, r.dealer_code, r.channel, r.trainer_id, r.dob, r.date, r.time_from, r.time_to,
+            r.mpin
+          ]
+        );
+        updatedCount += updRes.affectedRows;
+      }
+    }
+
+    res.json({ 
+      success: true, 
+      inserted: insertedCount, 
+      updated: updatedCount, 
+      total: rows.length 
+    });
   } catch (err) {
     console.error('[uploadParticipants]', err);
     res.status(500).json({ success: false, error: err.message });
