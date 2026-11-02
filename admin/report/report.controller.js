@@ -1488,7 +1488,7 @@ exports.exportTVOverallAttendance = async (req, res) => {
         date: new Date(p.date),
         level: p.level,
         region: p.region,
-        mpin: p.mpin,
+        mpin: Number(p.mpin), // ✅ FIXED: Cast to Number to remove green box
         dealer_code: p.dealer_code,
         dealer_name: p.dealer_name,
         city: p.city,
@@ -1532,9 +1532,11 @@ exports.exportTVOverallResult = async (req, res) => {
     const projects = ['TV_DSE&EV_L1', 'TV_TL_L1', 'TV_L2'];
 
     // 1. Fetch Participants
+    // ✅ ADDED: d.percentage
     const [participants] = await pool.query(
       `SELECT p.*, 
               d.round_status, d.status AS cert_status, 
+              d.percentage,
               t.name AS trainer_name, t.agency
        FROM participants p
        LEFT JOIN dashboard d ON d.mpin = p.mpin
@@ -1555,10 +1557,10 @@ exports.exportTVOverallResult = async (req, res) => {
 
     const roundMap = {};
     rounds.forEach(r => {
-      (roundMap[r.mpin] ||= {})[r.round_name] = r.score;
+      (roundMap[r.mpin] ||= {})[r.round_name] = r.score !== null ? Number(r.score) : null;
     });
 
-    // 3. Fetch project_round_config (NO HARDCODED ROUNDS)
+    // 3. Fetch project_round_config
     const [configs] = await pool.query(
       `SELECT project_name, rounds FROM project_round_config WHERE project_name IN (?)`,
       [projects]
@@ -1590,7 +1592,7 @@ exports.exportTVOverallResult = async (req, res) => {
     const wb = new ExcelJS.Workbook();
 
     // ==========================================
-    // SHEET 1: SUMMARY (already dynamic roles)
+    // SHEET 1: SUMMARY
     // ==========================================
     const wsSummary = wb.addWorksheet('Summary');
     const roles = [...new Set(participants.map(p => p.role).filter(Boolean))].sort();
@@ -1681,11 +1683,11 @@ exports.exportTVOverallResult = async (req, res) => {
 
           if (c === appPctIdx) {
             if (cell.value === 0) cell.value = '#DIV/0!';
-            else cell.numFmt = '0%';
+            else cell.numFmt = '0.00%';
           }
           if (c === certPctIdx) {
             if (cell.value === null) cell.value = '#DIV/0!';
-            else cell.numFmt = '0%';
+            else cell.numFmt = '0.00%';
           }
         });
       });
@@ -1698,7 +1700,7 @@ exports.exportTVOverallResult = async (req, res) => {
     if (participants.filter(p => p.level === 'L2').length) buildSummaryBlock('L2', participants.filter(p => p.level === 'L2'));
 
     // ==========================================
-    // SHEET 2: STATUS (DYNAMIC ROUND COLUMNS)
+    // SHEET 2: STATUS
     // ==========================================
     const wsStatus = wb.addWorksheet('Status');
 
@@ -1717,7 +1719,7 @@ exports.exportTVOverallResult = async (req, res) => {
     baseWidths.forEach((w, i) => { wsStatus.getColumn(i + 1).width = w; });
     for (let i = baseLen + 1; i <= tailEnd; i++) wsStatus.getColumn(i).width = 12;
 
-    // Header row 1
+    // Header rows
     const hr1 = [...baseCols];
     roundColumnGroups.forEach(g => {
       hr1.push(g.label, ...Array(g.rounds.length - 1).fill(''));
@@ -1729,7 +1731,7 @@ exports.exportTVOverallResult = async (req, res) => {
     wsStatus.addRow(hr1);
     wsStatus.addRow(hr2);
 
-    // Merge round-group headers dynamically
+    // Merge headers
     let roundColStart = baseLen + 1;
     roundColumnGroups.forEach(g => {
       if (g.rounds.length > 1) {
@@ -1752,37 +1754,45 @@ exports.exportTVOverallResult = async (req, res) => {
       });
     });
 
-    // Data rows (fully dynamic round placement)
+    // Data rows
     participants.forEach((p, idx) => {
       const rm = roundMap[p.mpin] || {};
       const pRounds = projectRounds[p.project_name] || [];
 
       const scores = allRoundCols.map(rName =>
-        pRounds.includes(rName) && rm[rName] !== undefined ? rm[rName] : ''
+        pRounds.includes(rName) && rm[rName] !== undefined && rm[rName] !== null ? Number(rm[rName]) : ''
       );
 
       const numeric = scores.filter(v => typeof v === 'number');
       const total = numeric.reduce((a, b) => a + b, 0);
-      const overallTotal = 150; // keep legacy max; can be dynamic if config exposes per-round max
-      const percentage = total / overallTotal;
+      const overallTotal = 150; 
+      
+      // ✅ FIXED: Pick percentage directly from DB
+      const percentage = p.percentage !== null ? Number(p.percentage) : 0;
 
       const appeared = ['Completed', 'In Progress'].includes(p.round_status);
       const attendance = appeared ? 'Appeared' : 'Not Appeared';
       const certified = appeared ? (p.cert_status === 'Pass' ? 'Yes' : 'No') : '';
 
       const row = wsStatus.addRow([
-        idx + 1, new Date(p.date), p.level, p.region, p.mpin, p.dealer_code,
-        p.dealer_name, p.city, p.channel, p.name, p.role, p.trainer_name || '—', p.agency || '—', p.time_from, p.time_to,
+        idx + 1, new Date(p.date), p.level, p.region, 
+        Number(p.mpin), 
+        p.dealer_code, p.dealer_name, p.city, p.channel, p.name, p.role, 
+        p.trainer_name || '—', p.agency || '—', p.time_from, p.time_to,
         ...scores,
-        total.toFixed(2), overallTotal, percentage, attendance, certified
+        Number(total), 
+        Number(overallTotal), 
+        Number(percentage), 
+        attendance, certified
       ]);
 
       row.eachCell({ includeEmpty: true }, (cell, colNum) => {
         cell.alignment = { vertical: 'middle', horizontal: 'center' };
         cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
         if (colNum === 2) cell.numFmt = 'dd-mmm-yy';
-        if (colNum === tailStart) cell.numFmt = '0.00';
-        if (colNum === tailStart + 2) cell.numFmt = '0%';
+        
+        // ✅ FIXED: Use 0.00"%" so it shows the DB value exactly (e.g., 93.33%)
+        if (colNum === tailStart + 2) cell.numFmt = '0.00"%"'; 
       });
 
       row.getCell(7).alignment = { vertical: 'middle', horizontal: 'left' };
