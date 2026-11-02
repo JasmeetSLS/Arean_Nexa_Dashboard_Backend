@@ -27,7 +27,7 @@ app.use('/api', requireAuth, webhookRoutes);
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 const server = http.createServer(app);
-const { initSocket } = require('./socket');
+const { initSocket } = require('./utils/socket');
 const io = initSocket(server);
 app.set('io', io); // <-- available in routes via req.app.get('io')
 
