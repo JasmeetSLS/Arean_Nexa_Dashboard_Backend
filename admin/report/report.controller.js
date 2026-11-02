@@ -243,7 +243,7 @@ exports.exportArenaDailyReport = async (req, res) => {
         sno: idx + 1,
         date: new Date(date + 'T00:00:00'),
         region: p.region,
-        mpin: p.mpin,
+        mpin: Number(p.mpin),
         dealer_code: p.dealer_code,
         city: p.city,
         dealer_name: p.dealer_name,
@@ -367,7 +367,7 @@ exports.exportArenaOverallAttendance = async (req, res) => {
           sno:           idx + 1,
           level:         p.level,
           region:        p.region,
-          mpin:          p.mpin,
+          mpin:          Number(p.mpin),
           dealer_code:   p.dealer_code,
           city:          p.city,
           dealer_name:   p.dealer_name,
@@ -618,13 +618,13 @@ exports.exportArenaOverallResult = async (req, res) => {
 
     participants.forEach((r, idx) => {
       const isAppeared = r.appeared_status === 'Appeared';
-      const displayScore = isAppeared ? r.main_round : '';
+      const displayScore = isAppeared ? Number(r.main_round): '';
       const displayCertified = isAppeared ? r.certified_status : '';
 
       const row = wsStatus.addRow({
         sno: idx + 1,
         main_round_date: r.main_round_date ? new Date(r.main_round_date) : '',
-        region: r.region, mpin: r.mpin, dealer_code: r.dealer_code, dealer_city: r.dealer_city,
+        region: r.region, mpin: Number(r.mpin), dealer_code: r.dealer_code, dealer_city: r.dealer_city,
         dealer_name: r.dealer_name, name: r.name, eligible: r.eligible,
         appeared_status: r.appeared_status, main_round: displayScore, certified_status: displayCertified
       });
@@ -913,7 +913,7 @@ exports.exportArenaWinnerSummary = async (req, res) => {
         sno: idx + 1,
         date: r.main_round_date ? new Date(r.main_round_date) : '',
         region: r.region,
-        mpin: r.mpin,
+        mpin: Number(r.mpin),
         dealer_code: r.dealer_code,
         dealer_city: r.dealer_city,
         dealer_name: r.dealer_name,
@@ -1029,11 +1029,12 @@ exports.exportTVMorning = async (req, res) => {
 
     const roundMap = {};
     rounds.forEach(r => {
-      (roundMap[r.mpin] ||= {})[r.round_name] = r.score;
+      // ✅ FIXED: Convert score to Number (e.g. "46.00" -> 46) so math works
+      (roundMap[r.mpin] ||= {})[r.round_name] = r.score !== null ? Number(r.score) : null;
     });
 
     // ==========================================
-    // 1.b FETCH ROUND CONFIG (NO HARDCODED ROUNDS)
+    // 1.b FETCH ROUND CONFIG
     // ==========================================
     const [configs] = await pool.query(
       `SELECT project_name, rounds FROM project_round_config WHERE project_name IN (?)`,
@@ -1046,7 +1047,7 @@ exports.exportTVMorning = async (req, res) => {
       projectRounds[c.project_name] = parsed.map(r => r.name);
     });
 
-    // Group projects that share the same round set — drives column layout
+    // Group projects that share the same round set
     const roundColumnGroups = [];
     const groupByKey = {};
     Object.entries(projectRounds).forEach(([proj, rList]) => {
@@ -1068,7 +1069,7 @@ exports.exportTVMorning = async (req, res) => {
     // ==========================================
     const wbMorning = new ExcelJS.Workbook();
 
-    // --- SHEET 1: SUMMARY (roles already dynamic) ---
+    // --- SHEET 1: SUMMARY ---
     const wsSummary = wbMorning.addWorksheet('Summary');
     const roles = [...new Set(participants.map(p => p.role).filter(Boolean))].sort();
 
@@ -1155,7 +1156,7 @@ exports.exportTVMorning = async (req, res) => {
     if (participants.filter(p => p.level === 'L1').length) buildSummaryBlock('L1', participants.filter(p => p.level === 'L1'));
     if (participants.filter(p => p.level === 'L2').length) buildSummaryBlock('L2', participants.filter(p => p.level === 'L2'));
 
-    // --- SHEET 2: STATUS (DYNAMIC ROUND COLUMNS) ---
+    // --- SHEET 2: STATUS ---
     const wsStatus = wbMorning.addWorksheet('Status');
     const baseCols = ['Level', 'REGION', 'MSPIN', 'DEALER_CD_FOR_CD', 'DEALER_NAME', 'CITY', 'CHANNEL', 'NAME', 'DESG', 'Trainer Name', 'Agency', 'From Time', 'To Time'];
     const tailCols = ['Total', 'Overall Total', 'Percentage', 'Attendance Status', 'Certified'];
@@ -1200,23 +1201,24 @@ exports.exportTVMorning = async (req, res) => {
       });
     });
 
-    // Data rows (fully dynamic round placement)
+    // Data rows
     participants.forEach(p => {
       const rm = roundMap[p.mpin] || {};
       const pRounds = projectRounds[p.project_name] || [];
 
       // Only fill rounds that belong to this participant's project
       const scores = allRoundCols.map(rName =>
-        pRounds.includes(rName) && rm[rName] !== undefined ? rm[rName] : ''
+        pRounds.includes(rName) && rm[rName] !== undefined && rm[rName] !== null ? Number(rm[rName]) : ''
       );
 
+      // ✅ Calculate Total correctly (ignoring empty strings)
       const total = scores.filter(v => typeof v === 'number').reduce((a, b) => a + b, 0);
       const appeared = ['Completed', 'In Progress'].includes(p.round_status);
 
       const row = wsStatus.addRow([
-        p.level, p.region, p.mpin, p.dealer_code, p.dealer_name, p.city, p.channel,
+        p.level, p.region, Number(p.mpin), p.dealer_code, p.dealer_name, p.city, p.channel, // ✅ Number(p.mpin)
         p.name, p.role, p.trainer_name || '—', p.agency || '—', p.time_from, p.time_to,
-        ...scores, total.toFixed(2), 150, total / 150,
+        ...scores, Number(total), 150, total / 150, // ✅ Number(total) instead of toFixed(2)
         appeared ? 'Appeared' : 'Not Appeared',
         appeared ? (p.cert_status === 'Pass' ? 'Yes' : 'No') : ''
       ]);
@@ -1225,7 +1227,7 @@ exports.exportTVMorning = async (req, res) => {
         cell.alignment = { vertical: 'middle', horizontal: 'center' };
         cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
         if (colNum === tailStart + 2) cell.numFmt = '0%';
-        if (colNum === tailStart) cell.numFmt = '0.00';
+        // ✅ Removed cell.numFmt = '0.00' so Total shows as 136 instead of 136.00
       });
       row.getCell(5).alignment = { vertical: 'middle', horizontal: 'left' };
       row.getCell(8).alignment = { vertical: 'middle', horizontal: 'left' };
@@ -1234,7 +1236,7 @@ exports.exportTVMorning = async (req, res) => {
     const buffer1 = await wbMorning.xlsx.writeBuffer();
 
     // ==========================================
-    // 3. WORKBOOK 2: ATTENDANCE REPORT (unchanged)
+    // 3. WORKBOOK 2: ATTENDANCE REPORT
     // ==========================================
     const wbAttendance = new ExcelJS.Workbook();
     const wsAttendance = wbAttendance.addWorksheet('Attendance');
@@ -1270,7 +1272,7 @@ exports.exportTVMorning = async (req, res) => {
       const appeared = ['Completed', 'In Progress'].includes(p.round_status);
       const row = wsAttendance.addRow({
         sno: idx + 1, region: p.region, dealer_name: p.dealer_name, dealer_code: p.dealer_code,
-        city: p.city, mpin: p.mpin, name: p.name, role: p.role, level: p.level,
+        city: p.city, mpin: Number(p.mpin), name: p.name, role: p.role, level: p.level, // ✅ Number(p.mpin)
         trainer_name: p.trainer_name || '—', agency: p.agency || '—', date: new Date(p.date),
         time_from: p.time_from, time_to: p.time_to, attendance_status: appeared ? 'Appeared' : 'Not Appeared'
       });
@@ -1805,7 +1807,7 @@ exports.exportTVWinners = async (req, res) => {
 
     const projects = ['TV_DSE&EV_L1', 'TV_TL_L1', 'TV_L2'];
 
-    // 1. Fetch Project Round Configs (already dynamic)
+    // 1. Fetch Project Round Configs
     const [configs] = await pool.query(
       `SELECT project_name, rounds FROM project_round_config WHERE project_name IN (?)`,
       [projects]
@@ -1952,7 +1954,7 @@ exports.exportTVWinners = async (req, res) => {
     // ==========================================
     const wb = new ExcelJS.Workbook();
 
-    // ---- Summary sheet (DYNAMIC ROLES — was hardcoded) ----
+    // ---- Summary sheet ----
     const wsSummary = wb.addWorksheet('Summary');
     const rolesList = [...new Set(processedData.map(p => p.role).filter(Boolean))].sort();
     const nRoles = rolesList.length;
@@ -1989,7 +1991,6 @@ exports.exportTVWinners = async (req, res) => {
     const gtMapped = Array(nRoles).fill(0), gtApp = Array(nRoles).fill(0), gtCert = Array(nRoles).fill(0);
     let gtMappedT = 0, gtAppT = 0, gtCertT = 0;
 
-    // Dynamic column indices for the two percentage columns
     const appPctCol = 3 + (nRoles + 1) * 2;
     const certPctCol = 3 + (nRoles + 1) * 3 + 1;
 
@@ -2028,7 +2029,7 @@ exports.exportTVWinners = async (req, res) => {
       if (c === appPctCol || c === certPctCol) cell.numFmt = '0%';
     });
 
-    // ---- Individual role sheets (already fully dynamic) ----
+    // ---- Individual role sheets ----
     const uniqueRoles = [...new Set(sortedData.map(p => p.role || 'Unknown'))].sort();
 
     uniqueRoles.forEach(role => {
@@ -2071,7 +2072,7 @@ exports.exportTVWinners = async (req, res) => {
       dynamicColumns.push(
         { header: 'Total', key: 'total', width: 12 },
         { header: 'Overall Total', key: 'overall', width: 12 },
-        { header: 'Attendance Status', key: 'attendance', width: 18 },
+        // ✅ REMOVED 'Attendance Status' column here
         { header: 'Certified', key: 'certified', width: 12 },
         { header: 'DOB', key: 'dob', width: 15 },
         { header: 'Last Round Score', key: 'last_round', width: 15 },
@@ -2094,7 +2095,7 @@ exports.exportTVWinners = async (req, res) => {
 
       roleData.forEach((p, idx) => {
         const total = p.total;
-        const overall = 150; // legacy max; can be dynamic if config exposes per-round max
+        const overall = 150;
         const pct = total / overall;
 
         const rowData = {
@@ -2111,8 +2112,8 @@ exports.exportTVWinners = async (req, res) => {
           role: p.role,
           total: total.toFixed(2),
           overall: overall,
-          attendance: p.isAppeared ? 'Appeared' : 'Not Appeared',
-          certified: p.cert_status === 'Pass' ? 'Yes' : 'No',
+          // ✅ UPDATED: if not appeared, write 'Not Appeared'
+          certified: p.isAppeared ? (p.cert_status === 'Pass' ? 'Yes' : 'No') : 'Not Appeared',
           dob: p.dob.getTime() === new Date('1900-01-01').getTime() ? '—' : p.dob,
           last_round: p.lastRoundScore,
           r1: p.round1_score,
@@ -2150,6 +2151,368 @@ exports.exportTVWinners = async (req, res) => {
 
   } catch (err) {
     console.error('[exportTVWinners]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+exports.exportTVWinnersZIP = async (req, res) => {
+  try {
+    const { level } = req.query;
+    if (!level) return res.status(400).json({ success: false, error: 'Level query parameter is required (e.g., ?level=L1)' });
+
+    const projects = ['TV_DSE&EV_L1', 'TV_TL_L1', 'TV_L2'];
+
+    // 1. Fetch Project Round Configs
+    const [configs] = await pool.query(
+      `SELECT project_name, rounds FROM project_round_config WHERE project_name IN (?)`,
+      [projects]
+    );
+    const projectRounds = {};
+    configs.forEach(c => {
+      const parsed = typeof c.rounds === 'string' ? JSON.parse(c.rounds) : c.rounds;
+      projectRounds[c.project_name] = parsed.map(r => r.name);
+    });
+
+    // 2. Fetch Participants
+    const [participants] = await pool.query(
+      `SELECT p.*, 
+              d.round_status, d.status AS cert_status, 
+              r1.total_r1 AS round1_score
+       FROM participants p
+       LEFT JOIN dashboard d ON d.mpin = p.mpin
+       LEFT JOIN round_1 r1 ON r1.mpin = p.mpin
+       WHERE p.project_name IN (?) AND p.level = ?
+       ORDER BY p.region, p.role, p.mpin`,
+      [projects, level]
+    );
+
+    if (!participants.length) return res.status(404).json({ success: false, error: 'No data found' });
+
+    // 3. Fetch Round Scores
+    const mpins = participants.map(p => p.mpin);
+    const [rounds] = await pool.query(
+      `SELECT mpin, round_name, score FROM participant_rounds WHERE mpin IN (?)`,
+      [mpins]
+    );
+    const roundMap = {};
+    rounds.forEach(r => {
+      (roundMap[r.mpin] ||= {})[r.round_name] = r.score;
+    });
+
+    // 4. Process Data & Ranking
+    const processedData = participants.map(p => {
+      const rm = roundMap[p.mpin] || {};
+      const isAppeared = ['Completed', 'In Progress'].includes(p.round_status);
+      
+      const pRounds = projectRounds[p.project_name] || [];
+      const total = pRounds.reduce((sum, rName) => sum + (Number(rm[rName]) || 0), 0);
+      
+      let lastRoundScore = 0;
+      if (pRounds.includes('Round 3A') || pRounds.includes('Round 3B')) {
+        lastRoundScore = (Number(rm['Round 3A']) || 0) + (Number(rm['Round 3B']) || 0);
+      } else if (pRounds.length > 0) {
+        const lastRoundName = pRounds[pRounds.length - 1];
+        lastRoundScore = Number(rm[lastRoundName]) || 0;
+      }
+      
+      return {
+        ...p,
+        isAppeared,
+        total,
+        lastRoundScore,
+        round1_score: p.round1_score || 0,
+        dob: p.dob ? new Date(p.dob) : new Date('1900-01-01'), 
+      };
+    });
+
+    // Group by Region & Role
+    const groups = {};
+    processedData.forEach(p => {
+      const key = `${p.region}|${p.role}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(p);
+    });
+
+    // Sort and Rank
+    Object.keys(groups).forEach(key => {
+      groups[key].sort((a, b) => {
+        if (a.isAppeared !== b.isAppeared) return a.isAppeared ? -1 : 1;
+        if (!a.isAppeared) return a.mpin.localeCompare(b.mpin); 
+
+        if (b.total !== a.total) return b.total - a.total; 
+        if (b.round1_score !== a.round1_score) return b.round1_score - a.round1_score; 
+        if (b.lastRoundScore !== a.lastRoundScore) return b.lastRoundScore - a.lastRoundScore; 
+        return a.dob - b.dob; 
+      });
+
+      let rank = 1;
+      let lastRow = null;
+
+      for (let i = 0; i < groups[key].length; i++) {
+        const p = groups[key][i];
+        
+        if (!p.isAppeared) {
+          p.winner = '';
+          p.remarks = '';
+          continue;
+        }
+
+        if (lastRow && lastRow.isAppeared) {
+          if (p.total !== lastRow.total) rank++;
+          else if (p.round1_score !== lastRow.round1_score) rank++;
+          else if (p.lastRoundScore !== lastRow.lastRoundScore) rank++;
+          else if (p.dob.getTime() !== lastRow.dob.getTime()) rank++;
+        }
+        
+        if (rank <= 3) {
+          p.winner = rank === 1 ? '1st' : rank === 2 ? '2nd' : '3rd';
+          
+          const hasDobTie = groups[key].some(other => 
+            other.isAppeared && other.total === p.total && other.round1_score === p.round1_score && 
+            other.lastRoundScore === p.lastRoundScore && other.dob.getTime() !== p.dob.getTime()
+          );
+
+          if (hasDobTie) {
+            p.remarks = "Selected based on DOB tie-breaker as per rules when marks were equal.";
+          } else {
+            const hasR1Tie = groups[key].some(other => 
+              other.isAppeared && other.total === p.total && other.round1_score !== p.round1_score
+            );
+            if (hasR1Tie) {
+               p.remarks = "Selected based on Round 1 Score tie-breaker when main round marks were equal.";
+            } else {
+               const hasLastRoundTie = groups[key].some(other => 
+                  other.isAppeared && other.total === p.total && other.round1_score === p.round1_score && other.lastRoundScore !== p.lastRoundScore
+               );
+               if (hasLastRoundTie) {
+                 p.remarks = "Selected based on Last Round Score tie-breaker when main rounds and R1 were equal.";
+               } else {
+                 p.remarks = '';
+               }
+            }
+          }
+        } else {
+          p.winner = '';
+          p.remarks = '';
+        }
+        lastRow = p;
+      }
+    });
+
+    // Flatten back to array
+    const sortedData = [];
+    Object.keys(groups).sort().forEach(key => {
+      sortedData.push(...groups[key]);
+    });
+
+    // ==========================================
+    // 5. BUILD EXCEL FILES
+    // ==========================================
+    const zip = new AdmZip();
+    
+    const uniqueRoles = [...new Set(processedData.map(p => p.role).filter(Boolean))].sort();
+    const uniqueRegions = [...new Set(processedData.map(p => p.region).filter(Boolean))].sort();
+    const numRoles = uniqueRoles.length;
+
+    // ==========================================
+    // FILE 1: GLOBAL SUMMARY
+    // ==========================================
+    const wbSummary = new ExcelJS.Workbook();
+    const wsSummary = wbSummary.addWorksheet('Summary');
+    
+    const writeSummaryHeaders = (ws) => {
+      const hr1 = [
+        'REGION', 'CONTEST LOCATION', 
+        'Mapped', ...Array(numRoles - 1).fill(''), 'Total', 
+        'Appeared', ...Array(numRoles - 1).fill(''), 'Total', 'Appeared %', 
+        'Certified', ...Array(numRoles - 1).fill(''), 'Total', 'Certified % from Appeared'
+      ];
+      const hr2 = ['', '', ...uniqueRoles, 'Total', ...uniqueRoles, 'Total', '', ...uniqueRoles, 'Total', ''];
+      
+      ws.addRow(hr1);
+      ws.addRow(hr2);
+
+      ws.mergeCells('A1:A2'); ws.mergeCells('B1:B2');
+      let cIdx = 3;
+      ws.mergeCells(1, cIdx, 1, cIdx + numRoles); cIdx += numRoles + 1; 
+      ws.mergeCells(1, cIdx, 1, cIdx + numRoles); cIdx += numRoles + 1; 
+      ws.mergeCells(1, cIdx, 2, cIdx); cIdx += 1; 
+      ws.mergeCells(1, cIdx, 1, cIdx + numRoles); cIdx += numRoles + 1; 
+      ws.mergeCells(1, cIdx, 2, cIdx); 
+
+      [1, 2].forEach(r => {
+        ws.getRow(r).eachCell({ includeEmpty: true }, cell => {
+          cell.font = { bold: true, size: 10 };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
+          cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+          cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+        });
+      });
+    };
+
+    const writeSummaryRow = (ws, region, rows) => {
+      const mapped = uniqueRoles.map(role => rows.filter(p => p.role === role).length);
+      const app = uniqueRoles.map(role => rows.filter(p => p.role === role && p.isAppeared).length);
+      const cert = uniqueRoles.map(role => rows.filter(p => p.role === role && p.cert_status === 'Pass').length);
+
+      const tMap = mapped.reduce((a, b) => a + b, 0);
+      const tApp = app.reduce((a, b) => a + b, 0);
+      const tCert = cert.reduce((a, b) => a + b, 0);
+
+      const row = ws.addRow([
+        region, 'Online', ...mapped, tMap, ...app, tApp, tMap > 0 ? tApp / tMap : 0, ...cert, tCert, tApp > 0 ? tCert / tApp : 0
+      ]);
+
+      row.eachCell({ includeEmpty: true }, (cell, c) => {
+        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+        if (c === 3 + (numRoles + 1) * 2 || c === 3 + (numRoles + 1) * 3 + 1) cell.numFmt = '0%';
+      });
+    };
+
+    writeSummaryHeaders(wsSummary);
+
+    const gtMapped = Array(numRoles).fill(0), gtApp = Array(numRoles).fill(0), gtCert = Array(numRoles).fill(0);
+    let gtMappedT = 0, gtAppT = 0, gtCertT = 0;
+
+    uniqueRegions.forEach(reg => {
+      const rRows = processedData.filter(p => p.region === reg);
+      writeSummaryRow(wsSummary, reg, rRows);
+
+      const mapped = uniqueRoles.map(role => rRows.filter(p => p.role === role).length);
+      const app = uniqueRoles.map(role => rRows.filter(p => p.role === role && p.isAppeared).length);
+      const cert = uniqueRoles.map(role => rRows.filter(p => p.role === role && p.cert_status === 'Pass').length);
+
+      mapped.forEach((v, i) => gtMapped[i] += v); gtMappedT += mapped.reduce((a, b) => a + b, 0);
+      app.forEach((v, i) => gtApp[i] += v); gtAppT += app.reduce((a, b) => a + b, 0);
+      cert.forEach((v, i) => gtCert[i] += v); gtCertT += cert.reduce((a, b) => a + b, 0);
+    });
+
+    const gtRow = wsSummary.addRow([
+      'Grand Total', '', ...gtMapped, gtMappedT, ...gtApp, gtAppT, gtMappedT > 0 ? gtAppT / gtMappedT : 0, ...gtCert, gtCertT, gtAppT > 0 ? gtCertT / gtAppT : 0
+    ]);
+    gtRow.eachCell((cell, c) => {
+      cell.font = { bold: true };
+      cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+      cell.alignment = { vertical: 'middle', horizontal: 'center' };
+      if (c === 3 + (numRoles + 1) * 2 || c === 3 + (numRoles + 1) * 3 + 1) cell.numFmt = '0%';
+    });
+
+    const summaryBuffer = await wbSummary.xlsx.writeBuffer();
+    zip.addFile(`Summary_${level}.xlsx`, Buffer.from(summaryBuffer));
+
+    // ==========================================
+    // FILE 2+: INDIVIDUAL REGIONS (Multi-Sheet)
+    // ==========================================
+    for (const region of uniqueRegions) {
+      const regionData = sortedData.filter(p => p.region === region);
+
+      const wbRegion = new ExcelJS.Workbook();
+
+      // --- SHEET 1: REGION SUMMARY ---
+      const wsRegionSummary = wbRegion.addWorksheet('Summary');
+      writeSummaryHeaders(wsRegionSummary);
+      writeSummaryRow(wsRegionSummary, region, regionData);
+      
+      const mapped = uniqueRoles.map(role => regionData.filter(p => p.role === role).length);
+      const app = uniqueRoles.map(role => regionData.filter(p => p.role === role && p.isAppeared).length);
+      const cert = uniqueRoles.map(role => regionData.filter(p => p.role === role && p.cert_status === 'Pass').length);
+      
+      const tMap = mapped.reduce((a, b) => a + b, 0);
+      const tApp = app.reduce((a, b) => a + b, 0);
+      const tCert = cert.reduce((a, b) => a + b, 0);
+      
+      const regGtRow = wsRegionSummary.addRow([
+        'Region Total', '', ...mapped, tMap, ...app, tApp, tMap > 0 ? tApp / tMap : 0, ...cert, tCert, tApp > 0 ? tCert / tApp : 0
+      ]);
+      regGtRow.eachCell((cell, c) => {
+        cell.font = { bold: true };
+        cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        if (c === 3 + (numRoles + 1) * 2 || c === 3 + (numRoles + 1) * 3 + 1) cell.numFmt = '0%';
+      });
+
+      // --- SHEETS 2+: INDIVIDUAL ROLES ---
+      const regionRoles = [...new Set(regionData.map(p => p.role).filter(Boolean))].sort();
+      
+      regionRoles.forEach(role => {
+        const roleData = regionData.filter(p => p.role === role);
+        if (roleData.length === 0) return;
+
+        const wsRole = wbRegion.addWorksheet(role);
+
+        wsRole.columns = [
+          { header: 'S.NO.', key: 'sno', width: 8 },
+          { header: 'MAIN ROUND DATE', key: 'date', width: 15 },
+          { header: 'Level', key: 'level', width: 8 },
+          { header: 'REGION', key: 'region', width: 10 },
+          { header: 'MSPIN', key: 'mpin', width: 15 },
+          { header: 'DEALER_CD_FOR_CD', key: 'dealer_code', width: 18 },
+          { header: 'DEALER_NAME', key: 'dealer_name', width: 40 },
+          { header: 'CITY', key: 'city', width: 15 },
+          { header: 'Channel', key: 'channel', width: 12 },
+          { header: 'NAME', key: 'name', width: 25 },
+          { header: 'DESG', key: 'role', width: 12 },
+          { header: 'Certified', key: 'certified', width: 12 },
+          { header: 'Winners', key: 'winner', width: 10 },
+          { header: 'Remarks', key: 'remarks', width: 50 }
+        ];
+
+        const hRow = wsRole.getRow(1);
+        hRow.height = 30;
+        hRow.eachCell((cell) => {
+          cell.font = { bold: true, size: 10, color: { argb: 'FF000000' } };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
+          cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+          cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+        });
+
+        roleData.forEach((p, idx) => {
+          const row = wsRole.addRow({
+            sno: idx + 1,
+            date: new Date(p.date),
+            level: p.level,
+            region: p.region,
+            mpin: p.mpin,
+            dealer_code: p.dealer_code,
+            dealer_name: p.dealer_name,
+            city: p.city,
+            channel: p.channel,
+            name: p.name,
+            role: p.role,
+            // ✅ UPDATED: Already had this logic, just ensuring consistency
+            certified: p.isAppeared ? (p.cert_status === 'Pass' ? 'Yes' : 'No') : 'Not Appeared',
+            winner: p.winner || '',
+            remarks: p.remarks || ''
+          });
+
+          row.eachCell({ includeEmpty: true }, (cell) => {
+            cell.alignment = { vertical: 'middle', horizontal: 'center' };
+            cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+          });
+
+          if (row.getCell('date').value) row.getCell('date').numFmt = 'dd-mmm-yy';
+          
+          row.getCell('dealer_name').alignment = { vertical: 'middle', horizontal: 'left' };
+          row.getCell('name').alignment = { vertical: 'middle', horizontal: 'left' };
+          row.getCell('remarks').alignment = { vertical: 'middle', horizontal: 'left' };
+        });
+      });
+
+      const regionBuffer = await wbRegion.xlsx.writeBuffer();
+      zip.addFile(`Region_${region}_${level}.xlsx`, Buffer.from(regionBuffer));
+    }
+
+    // ==========================================
+    // 6. SEND ZIP RESPONSE
+    // ==========================================
+    const zipBuffer = zip.toBuffer();
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="TV_Winners_${level}.zip"`);
+    res.send(zipBuffer);
+
+  } catch (err) {
+    console.error('[exportTVWinnersZIP]', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };

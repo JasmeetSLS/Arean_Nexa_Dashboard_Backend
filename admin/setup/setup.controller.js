@@ -349,6 +349,7 @@ exports.getGridParticipant = async (req, res) => {
         trainerId:   r.trainerId,
         trainerName: r.trainerName,
         score:       r.score,
+        // score:      Number(r.score),
       });
     }
 
