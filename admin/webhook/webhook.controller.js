@@ -21,8 +21,8 @@ exports.saveRound = async (req, res) => {
     // 3. Insert or Update the round
     if (rows.length) {
       await pool.query(
-        `UPDATE participant_rounds SET score = ?, end_time = ?, trainer_id = ? WHERE id = ?`,
-        [score ?? null, end_time ?? null, trainer_id, rows[0].id]
+        `UPDATE participant_rounds SET start_time = ?, score = ?, end_time = ?, trainer_id = ? WHERE id = ?`,
+        [ start_time ?? null, score ?? null, end_time ?? null, trainer_id, rows[0].id]
       );
       return res.json({ success: true, action: 'updated' });
     }
