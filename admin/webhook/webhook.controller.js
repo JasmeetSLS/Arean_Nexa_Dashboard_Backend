@@ -14,15 +14,27 @@ exports.saveRound = async (req, res) => {
 
     // 2. Check if the round already exists
     const [rows] = await pool.query(
-      `SELECT id FROM participant_rounds WHERE mpin = ? AND round_name = ? LIMIT 1`,
+      `SELECT id, start_time, score, end_time, trainer_id
+         FROM participant_rounds
+        WHERE mpin = ? AND round_name = ?
+        LIMIT 1`,
       [mpin, round_name]
     );
 
     // 3. Insert or Update the round
     if (rows.length) {
+      const old = rows[0];
       await pool.query(
-        `UPDATE participant_rounds SET start_time = ?, score = ?, end_time = ?, trainer_id = ? WHERE id = ?`,
-        [ start_time ?? null, score ?? null, end_time ?? null, trainer_id, rows[0].id]
+        `UPDATE participant_rounds
+            SET start_time = ?, score = ?, end_time = ?, trainer_id = ?
+          WHERE id = ?`,
+        [
+          start_time ?? old.start_time,
+          score      ?? old.score,
+          end_time   ?? old.end_time,
+          trainer_id ?? old.trainer_id,
+          old.id,
+        ]
       );
       return res.json({ success: true, action: 'updated' });
     }
@@ -39,7 +51,6 @@ exports.saveRound = async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 };
-
 exports.resetRounds = async (req, res) => {
   try {
     const { mpin, rounds } = req.body;
