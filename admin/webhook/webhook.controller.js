@@ -2,6 +2,7 @@ const pool = require('../../config/db');
 
 exports.saveRound = async (req, res) => {
   try {
+     console.log('req.body:', req.body);   
     const { mpin, trainer_id, round_name, start_time, score, end_time } = req.body;
 
     // 1. Update participant date & trainer (Only runs if both are provided)
