@@ -51,33 +51,3 @@ exports.saveRound = async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 };
-exports.resetRounds = async (req, res) => {
-  try {
-    const { mpin, rounds } = req.body;
-    const toDelete = Object.keys(rounds || {}).filter(r => rounds[r] === true);
-
-    if (!mpin || !toDelete.length) {
-      return res.json({ success: true, message: 'Nothing to reset' });
-    }
-
-    await pool.query(
-      `DELETE FROM participant_rounds WHERE mpin = ? AND round_name IN (?)`,
-      [mpin, toDelete]
-    );
-
-    res.json({ success: true, message: 'Rounds reset successfully' });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-};
-
-// API Payload
-// {
-//   "mpin": "1341632",
-//   "rounds": {
-//     "Round 2A": true,
-//     "Round 2B": true,
-//     "Round 3A": false,
-//     "Round 3B": false
-//   }
-// }
