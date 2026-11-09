@@ -23,12 +23,11 @@ exports.listAdmins = async (_req, res) => {
 // =====================================================================
 exports.getOptions = async (req, res) => {
   try {
-    // --- Roles / Zones / Regions from participants ---
+    // --- Roles / Regions from participants ---
     const [pRows] = await pool.query(
-      `SELECT role, zone, region FROM participants`
+      `SELECT role, region FROM participants`
     );
     const roles   = Array.from(new Set(pRows.map((p) => p.role  ).filter(Boolean))).sort();
-    const zones   = Array.from(new Set(pRows.map((p) => p.zone  ).filter(Boolean))).sort();
     const regions = Array.from(new Set(pRows.map((p) => p.region).filter(Boolean))).sort();
 
     // --- Projects from project_round_config ---
@@ -44,7 +43,7 @@ exports.getOptions = async (req, res) => {
     let existing = null;
     if (req.query.userId) {
       const [up] = await pool.query(
-        `SELECT allowed_roles, allowed_zones, allowed_regions,
+        `SELECT allowed_roles, allowed_regions,
                 allowed_projects, permissions
            FROM admin_permission
           WHERE admin_id = ?
@@ -55,7 +54,6 @@ exports.getOptions = async (req, res) => {
       if (up.length) {
         existing = {
           allowed_roles:    up[0].allowed_roles,
-          allowed_zones:    up[0].allowed_zones,
           allowed_regions:  up[0].allowed_regions,
           allowed_projects: up[0].allowed_projects,
           permissions:      up[0].permissions,
@@ -65,7 +63,7 @@ exports.getOptions = async (req, res) => {
 
     res.json({
       success: true,
-      roles, zones, regions, projects,
+      roles, regions, projects,
       existing,
     });
   } catch (err) {
@@ -83,7 +81,6 @@ exports.savePermissions = async (req, res) => {
     const {
       userId,
       allowedRoles    = [],
-      allowedZones    = [],
       allowedRegions  = [],
       allowedProjects = [],
       permissions     = {},
@@ -94,7 +91,6 @@ exports.savePermissions = async (req, res) => {
     }
 
     const rolesJson    = JSON.stringify(allowedRoles);
-    const zonesJson    = JSON.stringify(allowedZones);
     const regionsJson  = JSON.stringify(allowedRegions);
     const projectsJson = JSON.stringify(allowedProjects);
     const permsJson    = JSON.stringify(permissions);
@@ -115,13 +111,12 @@ exports.savePermissions = async (req, res) => {
       await conn.query(
         `UPDATE admin_permission
             SET allowed_roles    = ?,
-                allowed_zones    = ?,
                 allowed_regions  = ?,
                 allowed_projects = ?,
                 permissions      = ?,
                 updated_at       = CURRENT_TIMESTAMP
           WHERE id = ?`,
-        [rolesJson, zonesJson, regionsJson, projectsJson, permsJson, existing[0].id]
+        [rolesJson, regionsJson, projectsJson, permsJson, existing[0].id]
       );
 
       await conn.query(
@@ -133,10 +128,10 @@ exports.savePermissions = async (req, res) => {
     } else {
       await conn.query(
         `INSERT INTO admin_permission
-           (admin_id, allowed_roles, allowed_zones, allowed_regions,
+           (admin_id, allowed_roles, allowed_regions,
             allowed_projects, permissions)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [userId, rolesJson, zonesJson, regionsJson, projectsJson, permsJson]
+         VALUES (?, ?, ?, ?, ?)`,
+        [userId, rolesJson, regionsJson, projectsJson, permsJson]
       );
 
       action = 'inserted';

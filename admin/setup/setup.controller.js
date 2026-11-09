@@ -7,7 +7,7 @@ async function getAdminPermissions(userId) {
   if (!userId) return null;
   try {
     const [[row]] = await pool.query(
-      `SELECT allowed_roles, allowed_zones, allowed_regions, allowed_projects 
+      `SELECT allowed_roles, allowed_regions, allowed_projects 
          FROM admin_permission 
         WHERE admin_id = ? LIMIT 1`,
       [userId]
@@ -16,7 +16,6 @@ async function getAdminPermissions(userId) {
 
     return {
       roles:    Array.isArray(row.allowed_roles)    ? row.allowed_roles    : [],
-      zones:    Array.isArray(row.allowed_zones)    ? row.allowed_zones    : [],
       regions:  Array.isArray(row.allowed_regions)  ? row.allowed_regions  : [],
       projects: Array.isArray(row.allowed_projects) ? row.allowed_projects : [],
     };
