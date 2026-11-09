@@ -6,10 +6,7 @@ const pool = require('../../config/db');
 exports.listAdmins = async (_req, res) => {
   try {
     const [rows] = await pool.query(
-      `SELECT id, username, status
-         FROM admin
-        WHERE status = 'active'
-        ORDER BY username`
+      `SELECT id, username, status FROM admin WHERE status = 'active' ORDER BY username`
     );
     res.json({ success: true, admins: rows });
   } catch (err) {
@@ -19,51 +16,47 @@ exports.listAdmins = async (_req, res) => {
 };
 
 // =====================================================================
-// GET /api/permissions/options?userId=1
+// GET /api/permissions/options?userId=1&projects=P1,P2
+// Roles filtered by projects, Regions always all distinct
 // =====================================================================
 exports.getOptions = async (req, res) => {
   try {
-    // --- Roles / Regions from participants ---
-    const [pRows] = await pool.query(
-      `SELECT role, region FROM participants`
-    );
-    const roles   = Array.from(new Set(pRows.map((p) => p.role  ).filter(Boolean))).sort();
-    const regions = Array.from(new Set(pRows.map((p) => p.region).filter(Boolean))).sort();
+    const { userId, projects } = req.query;
+    const projectArr = projects ? String(projects).split(',').filter(Boolean) : [];
 
-    // --- Projects from project_round_config ---
+    // Projects
     const [projRows] = await pool.query(
-      `SELECT project_name
-         FROM project_round_config
-        WHERE status = 'active'
-        ORDER BY project_name`
+      `SELECT project_name FROM project_round_config WHERE status = 'active' ORDER BY project_name`
     );
-    const projects = projRows.map((p) => p.project_name);
 
-    // --- Existing permissions for this admin ---
+    // Roles (filtered by projects)
+    let roleSql = `SELECT DISTINCT role FROM participants WHERE role IS NOT NULL`;
+    const roleParams = [];
+    if (projectArr.length) { roleSql += ` AND project_name IN (?)`; roleParams.push(projectArr); }
+    roleSql += ` ORDER BY role`;
+    const [roleRows] = await pool.query(roleSql, roleParams);
+
+    // Regions (always all)
+    const [regionRows] = await pool.query(
+      `SELECT DISTINCT region FROM participants WHERE region IS NOT NULL ORDER BY region`
+    );
+
+    // Existing
     let existing = null;
-    if (req.query.userId) {
+    if (userId) {
       const [up] = await pool.query(
-        `SELECT allowed_roles, allowed_regions,
-                allowed_projects, permissions
-           FROM admin_permission
-          WHERE admin_id = ?
-          ORDER BY id DESC
-          LIMIT 1`,
-        [req.query.userId]
+        `SELECT allowed_roles, allowed_regions, allowed_projects, permissions
+           FROM admin_permission WHERE admin_id = ? ORDER BY id DESC LIMIT 1`,
+        [userId]
       );
-      if (up.length) {
-        existing = {
-          allowed_roles:    up[0].allowed_roles,
-          allowed_regions:  up[0].allowed_regions,
-          allowed_projects: up[0].allowed_projects,
-          permissions:      up[0].permissions,
-        };
-      }
+      if (up.length) existing = up[0];
     }
 
     res.json({
       success: true,
-      roles, regions, projects,
+      projects: projRows.map((r) => r.project_name),
+      roles:    roleRows.map((r) => r.role),
+      regions:  regionRows.map((r) => r.region),
       existing,
     });
   } catch (err) {
@@ -86,65 +79,46 @@ exports.savePermissions = async (req, res) => {
       permissions     = {},
     } = req.body;
 
-    if (!userId) {
-      return res.status(400).json({ success: false, error: 'userId is required' });
-    }
-
-    const rolesJson    = JSON.stringify(allowedRoles);
-    const regionsJson  = JSON.stringify(allowedRegions);
-    const projectsJson = JSON.stringify(allowedProjects);
-    const permsJson    = JSON.stringify(permissions);
+    if (!userId) return res.status(400).json({ success: false, error: 'userId is required' });
 
     await conn.beginTransaction();
 
     const [existing] = await conn.query(
-      `SELECT id FROM admin_permission
-        WHERE admin_id = ?
-        ORDER BY id DESC
-        LIMIT 1`,
+      `SELECT id FROM admin_permission WHERE admin_id = ? ORDER BY id DESC LIMIT 1`,
       [userId]
     );
 
-    let action;
+    const values = [
+      JSON.stringify(allowedRoles),
+      JSON.stringify(allowedRegions),
+      JSON.stringify(allowedProjects),
+      JSON.stringify(permissions),
+    ];
 
+    let action;
     if (existing.length) {
       await conn.query(
         `UPDATE admin_permission
-            SET allowed_roles    = ?,
-                allowed_regions  = ?,
-                allowed_projects = ?,
-                permissions      = ?,
-                updated_at       = CURRENT_TIMESTAMP
+            SET allowed_roles = ?, allowed_regions = ?,
+                allowed_projects = ?, permissions = ?,
+                updated_at = CURRENT_TIMESTAMP
           WHERE id = ?`,
-        [rolesJson, regionsJson, projectsJson, permsJson, existing[0].id]
+        [...values, existing[0].id]
       );
-
-      await conn.query(
-        `DELETE FROM admin_permission WHERE admin_id = ? AND id <> ?`,
-        [userId, existing[0].id]
-      );
-
+      await conn.query(`DELETE FROM admin_permission WHERE admin_id = ? AND id <> ?`, [userId, existing[0].id]);
       action = 'updated';
     } else {
       await conn.query(
         `INSERT INTO admin_permission
-           (admin_id, allowed_roles, allowed_regions,
-            allowed_projects, permissions)
+           (admin_id, allowed_roles, allowed_regions, allowed_projects, permissions)
          VALUES (?, ?, ?, ?, ?)`,
-        [userId, rolesJson, regionsJson, projectsJson, permsJson]
+        [userId, ...values]
       );
-
       action = 'inserted';
     }
 
     await conn.commit();
-
-    res.json({
-      success: true,
-      message: `Permissions ${action} successfully`,
-      action,
-      userId,
-    });
+    res.json({ success: true, message: `Permissions ${action} successfully`, action, userId });
   } catch (err) {
     await conn.rollback();
     console.error('[permission.savePermissions]', err);
@@ -160,17 +134,11 @@ exports.savePermissions = async (req, res) => {
 exports.getMyPermissions = async (req, res) => {
   try {
     const { userId } = req.user;
-    
-    // Fetch permissions for the logged in admin
     const [[row]] = await pool.query(
       `SELECT permissions FROM admin_permission WHERE admin_id = ? LIMIT 1`,
       [userId]
     );
-
-    // If no row exists, default to empty object (nothing visible)
-    const perms = row?.permissions || {};
-
-    res.json({ success: true, permissions: perms });
+    res.json({ success: true, permissions: row?.permissions || {} });
   } catch (err) {
     console.error('[getMyPermissions]', err);
     res.status(500).json({ success: false, error: err.message });
