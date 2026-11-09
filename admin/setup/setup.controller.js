@@ -34,7 +34,7 @@ exports.getFilters = async (req, res) => {
     const { userId } = req.user || {};
     const perms = await getAdminPermissions(userId);
 
-    const { project, zone, region, dealerName } = req.query;
+    const { project, region, dealerName } = req.query;
 
     // 1. Get ALL Projects (Filtered by Admin Permissions)
     let projSql = `SELECT id, project_name AS \`name\`, project_name, status FROM project_round_config WHERE status = 'active'`;
@@ -58,9 +58,6 @@ exports.getFilters = async (req, res) => {
     let permSql = '';
     const permParams = [];
     if (perms) {
-      if (perms.zones.length > 0) { permSql += ` AND zone IN (?)`; permParams.push(perms.zones); } 
-      else { permSql += ` AND 1=0`; }
-      
       if (perms.regions.length > 0) { permSql += ` AND region IN (?)`; permParams.push(perms.regions); } 
       else { permSql += ` AND 1=0`; }
 
@@ -68,50 +65,40 @@ exports.getFilters = async (req, res) => {
       else { permSql += ` AND 1=0`; }
     }
 
-    // 2. Zones
-    const [zones] = await pool.query(
-      `SELECT DISTINCT zone FROM participants WHERE project_name = ? AND zone IS NOT NULL ${permSql} ORDER BY zone`, 
-      [project, ...permParams]
-    );
-
-    // 3. Regions
+    // 2. Regions
     let regionQuery = `SELECT DISTINCT region FROM participants WHERE project_name = ? AND region IS NOT NULL ${permSql}`;
     const regionParams = [project, ...permParams];
-    if (zone) { regionQuery += ` AND zone = ?`; regionParams.push(zone); }
     regionQuery += ` ORDER BY region`;
     const [regions] = await pool.query(regionQuery, regionParams);
 
-    // 4. Dealer Names
+    // 3. Dealer Names
     let dealerQuery = `SELECT DISTINCT dealer_name FROM participants WHERE project_name = ? AND dealer_name IS NOT NULL ${permSql}`;
     const dealerParams = [project, ...permParams];
-    if (zone) { dealerQuery += ` AND zone = ?`; dealerParams.push(zone); }
     if (region) { dealerQuery += ` AND region = ?`; dealerParams.push(region); }
     dealerQuery += ` ORDER BY dealer_name`;
     const [dealers] = await pool.query(dealerQuery, dealerParams);
 
-    // 5. Dealer Codes
+    // 4. Dealer Codes
     let codeQuery = `SELECT DISTINCT dealer_code FROM participants WHERE project_name = ? AND dealer_code IS NOT NULL ${permSql}`;
     const codeParams = [project, ...permParams];
-    if (zone) { codeQuery += ` AND zone = ?`; codeParams.push(zone); }
     if (region) { codeQuery += ` AND region = ?`; codeParams.push(region); }
     if (dealerName) { codeQuery += ` AND dealer_name = ?`; codeParams.push(dealerName); }
     codeQuery += ` ORDER BY dealer_code`;
     const [codes] = await pool.query(codeQuery, codeParams);
 
-    // 6. Dates
+    // 5. Dates
     const [dates] = await pool.query(
       `SELECT DISTINCT date FROM participants WHERE project_name = ? AND date IS NOT NULL ${permSql} ORDER BY date DESC`, 
       [project, ...permParams]
     );
 
-    // 7. Trainers & Roles
+    // 6. Trainers & Roles
     const [trainers] = await pool.query(`SELECT id, name, username FROM trainers WHERE status = 'active' ORDER BY name`);
     const [roles] = await pool.query(`SELECT DISTINCT role FROM participants WHERE project_name = ? AND role IS NOT NULL ${permSql} ORDER BY role`, [project, ...permParams]);
 
     res.json({
       success: true,
       projects,
-      zones: zones.map(z => z.zone),
       regions: regions.map(r => r.region),
       dealerNames: dealers.map(d => d.dealer_name),
       dealerCodes: codes.map(c => c.dealer_code),
@@ -137,7 +124,7 @@ exports.getGridTrainer = async (req, res) => {
     const limit = parseInt(req.query.limit, 10) || 5;
     const offset = page * limit;
 
-    const { project, date, zone, region, dealerName, dealerCode, trainer, role, searchTrainer, searchParticipant } = req.query;
+    const { project, date, region, dealerName, dealerCode, trainer, role, searchTrainer, searchParticipant } = req.query;
 
     if (!project) return res.status(400).json({ success: false, error: 'Project is required' });
 
@@ -146,7 +133,6 @@ exports.getGridTrainer = async (req, res) => {
     const filterParams = [];
     
     if (date)       { filterSql += ' AND DATE(p.date) = ?'; filterParams.push(date); }
-    if (zone)       { filterSql += ' AND p.zone = ?'; filterParams.push(zone); }
     if (region)     { filterSql += ' AND p.region = ?'; filterParams.push(region); }
     if (dealerName) { filterSql += ' AND p.dealer_name = ?'; filterParams.push(dealerName); }
     if (dealerCode) { filterSql += ' AND p.dealer_code = ?'; filterParams.push(dealerCode); }
@@ -162,7 +148,6 @@ exports.getGridTrainer = async (req, res) => {
     // --- ADMIN PERMISSION FILTERS ---
     if (perms) {
       if (!perms.projects.includes(project)) return res.json({ success: true, rounds: [], trainers: [], pagination: { total: 0, totalPages: 1 }});
-      if (perms.zones.length > 0) { filterSql += ' AND p.zone IN (?)'; filterParams.push(perms.zones); } else { filterSql += ' AND 1=0'; }
       if (perms.regions.length > 0) { filterSql += ' AND p.region IN (?)'; filterParams.push(perms.regions); } else { filterSql += ' AND 1=0'; }
       if (perms.roles.length > 0) { filterSql += ' AND p.role IN (?)'; filterParams.push(perms.roles); } else { filterSql += ' AND 1=0'; }
     }
@@ -244,7 +229,7 @@ exports.getGridParticipant = async (req, res) => {
     const participantPage  = parseInt(req.query.participantPage, 10) || 0;
     const limit = parseInt(req.query.limit, 10) || 5;   
 
-    const { project, date, zone, region, dealerName, dealerCode, trainer, role, searchTrainer, searchParticipant } = req.query;
+    const { project, date, region, dealerName, dealerCode, trainer, role, searchTrainer, searchParticipant } = req.query;
 
     if (!project) return res.status(400).json({ success: false, error: 'Project is required' });
 
@@ -256,7 +241,6 @@ exports.getGridParticipant = async (req, res) => {
     const filterParams = [];
     
     if (date)       { filterSql += ' AND DATE(p.date) = ?'; filterParams.push(date); }
-    if (zone)       { filterSql += ' AND p.zone = ?'; filterParams.push(zone); }
     if (region)     { filterSql += ' AND p.region = ?'; filterParams.push(region); }
     if (dealerName) { filterSql += ' AND p.dealer_name = ?'; filterParams.push(dealerName); }
     if (dealerCode) { filterSql += ' AND p.dealer_code = ?'; filterParams.push(dealerCode); }
@@ -272,7 +256,6 @@ exports.getGridParticipant = async (req, res) => {
     // --- ADMIN PERMISSION FILTERS ---
     if (perms) {
       if (!perms.projects.includes(project)) return res.json({ success: true, participants: [] });
-      if (perms.zones.length > 0) { filterSql += ' AND p.zone IN (?)'; filterParams.push(perms.zones); } else { filterSql += ' AND 1=0'; }
       if (perms.regions.length > 0) { filterSql += ' AND p.region IN (?)'; filterParams.push(perms.regions); } else { filterSql += ' AND 1=0'; }
       if (perms.roles.length > 0) { filterSql += ' AND p.role IN (?)'; filterParams.push(perms.roles); } else { filterSql += ' AND 1=0'; }
     }
@@ -384,7 +367,7 @@ exports.getDashboard = async (req, res) => {
     const regionLimit = parseInt(req.query.regionLimit, 10) || 4;
     const offset      = regionPage * regionLimit;
     
-    const { project, date, zone, region, dealerName, dealerCode, trainer, role } = req.query;
+    const { project, date, region, dealerName, dealerCode, trainer, role } = req.query;
 
     if (!project) return res.status(400).json({ success: false, error: 'Project is required' });
     if (perms && !perms.projects.includes(project)) {
@@ -395,7 +378,6 @@ exports.getDashboard = async (req, res) => {
     let filterSql = '';
     const filterParams = [];
     if (date)       { filterSql += ' AND DATE(p.date) = ?'; filterParams.push(date); }
-    if (zone)       { filterSql += ' AND p.zone = ?'; filterParams.push(zone); }
     if (region)     { filterSql += ' AND p.region = ?'; filterParams.push(region); }
     if (dealerName) { filterSql += ' AND p.dealer_name = ?'; filterParams.push(dealerName); }
     if (dealerCode) { filterSql += ' AND p.dealer_code = ?'; filterParams.push(dealerCode); }
@@ -404,7 +386,6 @@ exports.getDashboard = async (req, res) => {
 
     // --- ADMIN PERMISSION FILTERS ---
     if (perms) {
-      if (perms.zones.length > 0) { filterSql += ' AND p.zone IN (?)'; filterParams.push(perms.zones); } else { filterSql += ' AND 1=0'; }
       if (perms.regions.length > 0) { filterSql += ' AND p.region IN (?)'; filterParams.push(perms.regions); } else { filterSql += ' AND 1=0'; }
       if (perms.roles.length > 0) { filterSql += ' AND p.role IN (?)'; filterParams.push(perms.roles); } else { filterSql += ' AND 1=0'; }
     }
@@ -454,19 +435,19 @@ exports.getDashboard = async (req, res) => {
     const [[{ regionTotal }]] = await pool.query(
       `SELECT COUNT(*) AS \`regionTotal\`
          FROM (
-           SELECT p.region, p.zone
+           SELECT p.region
              FROM dashboard d
              JOIN participants p ON p.mpin = d.mpin
             WHERE d.project_name = ?
               ${filterSql}
-            GROUP BY p.region, p.zone
+            GROUP BY p.region
          ) AS t`,
       [project, ...filterParams]
     );
 
     const [regionSummary] = await pool.query(
       `SELECT
-          p.region, p.zone,
+          p.region,
           COALESCE(SUM(d.round_status = 'Completed'), 0) AS \`completed\`,
           COALESCE(ROUND(SUM(d.status = 'Pass') /
               NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)  AS \`passRate\`,
@@ -475,8 +456,8 @@ exports.getDashboard = async (req, res) => {
         JOIN participants p ON p.mpin = d.mpin
        WHERE d.project_name = ?
          ${filterSql}
-       GROUP BY p.region, p.zone
-       ORDER BY p.region, p.zone
+       GROUP BY p.region
+       ORDER BY p.region
        LIMIT ? OFFSET ?`,
       [project, ...filterParams, regionLimit, offset]
     );
@@ -499,7 +480,6 @@ exports.getDashboard = async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 };
-
 // =====================================================================
 // GET /api/export/users/:project_id
 // =====================================================================
