@@ -27,42 +27,55 @@ exports.getMe = async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 };
+
 exports.getChatUsers = async (req, res) => {
   try {
     const userId = req.user.userId;
     const type   = req.user.type;
+    const search = req.query.search ? `%${req.query.search}%` : null; // ✅ Get search param
 
-    // inline: otherType
     let otherType;
     if (type === 'admin') otherType = 'trainer';
     else                  otherType = 'admin';
 
-    // fetch peers
     let people;
     if (type === 'admin') {
-      const [rows] = await pool.query(
-        `SELECT id, name AS username, photo_url FROM trainers ORDER BY name`
-      );
+      let sql = `SELECT id, name AS username, photo_url FROM trainers`;
+      let params = [];
+      
+      if (search) {
+        sql += ` WHERE name LIKE ?`;
+        params.push(search);
+      }
+      sql += ` ORDER BY name`;
+      
+      const [rows] = await pool.query(sql, params);
       people = rows;
     } else {
-      const [rows] = await pool.query(
-        `SELECT id, username, NULL AS photo_url
-           FROM admin WHERE status = 'active' ORDER BY username`
-      );
+      let sql = `SELECT id, username, NULL AS photo_url FROM admin WHERE status = 'active'`;
+      let params = [];
+      
+      if (search) {
+        sql += ` AND username LIKE ?`;
+        params.push(search);
+      }
+      sql += ` ORDER BY username`;
+      
+      const [rows] = await pool.query(sql, params);
       people = rows;
     }
 
     const users = [];
 
     for (const p of people) {
+      // ... (Keep your existing loop for fetching lastMessage and unread counts)
       const [last] = await pool.query(
         `SELECT id, message, sender_type, sender_id, created_at, is_read
            FROM chat_messages
           WHERE (sender_type = ? AND sender_id = ? AND receiver_type = ? AND receiver_id = ?)
              OR (sender_type = ? AND sender_id = ? AND receiver_type = ? AND receiver_id = ?)
           ORDER BY id DESC LIMIT 1`,
-        [type, userId, otherType, p.id,
-         otherType, p.id, type, userId]
+        [type, userId, otherType, p.id, otherType, p.id, type, userId]
       );
 
       const [unreadRows] = await pool.query(
@@ -85,7 +98,6 @@ exports.getChatUsers = async (req, res) => {
     }
 
     users.sort((a, b) => b.cacheKey - a.cacheKey);
-
     res.json({ success: true, users });
   } catch (err) {
     console.error('[chat.getChatUsers]', err);
