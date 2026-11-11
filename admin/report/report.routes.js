@@ -22,6 +22,12 @@ router.get('/export-tv-winners-zip', reportController.exportTVWinnersZIP);
 router.get('/tv-filters', reportController.getTVFilters);
 
 
+// ✅ NEXA Report API
+router.get('/nexa-filters', reportController.getNexaFilters);
+router.get('/nexa-overall-attendance', reportController.exportNexaOverallAttendance);
+router.get('/export-nexa-daily-report', reportController.exportNexaDailyReport); // ✅ ADDED
+router.get('/export-nexa-overall-result', reportController.exportNexaOverallResult);
+
 
 router.get('/download-template-round1', reportController.downloadRound1Sample);
 router.post('/import-round1', upload.single('file'), reportController.importRound1);

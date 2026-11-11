@@ -965,6 +965,7 @@ exports.getArenaFilters = async (req, res) => {
         `SELECT DISTINCT project_name
          FROM participants
          WHERE project_name IS NOT NULL
+         AND project_name LIKE 'Arena%'
          ORDER BY project_name`
       );
 
@@ -2921,6 +2922,699 @@ exports.getTVFilters = async (req, res) => {
 };
 
 
+// ==========================================
+// NEXA APIs
+// ==========================================
+
+exports.exportNexaDailyReport = async (req, res) => {
+  try {
+    const { project, date } = req.query;
+
+    if (!date) {
+      return res.status(400).json({ success: false, error: 'date is required (YYYY-MM-DD)' });
+    }
+    if (!project) {
+      return res.status(400).json({ success: false, error: 'project is required' });
+    }
+
+    // 1. FETCH DATA
+    const [participants] = await pool.query(
+      `SELECT p.*, 
+              d.round_status, d.status AS cert_status, 
+              t.name AS trainer_name, t.agency
+       FROM participants p
+       LEFT JOIN dashboard d ON d.mpin = p.mpin
+       LEFT JOIN trainers t ON t.username = p.trainer_id
+       WHERE p.date = ? AND p.project_name = ?
+       ORDER BY p.region, STR_TO_DATE(p.time_from, '%h:%i %p'), p.mpin`,
+      [date, project]
+    );
+
+    if (!participants.length) {
+      return res.status(404).json({ success: false, error: 'No data found' });
+    }
+
+    const now = new Date();
+
+    // Parse "9:30 AM" into a full Date on the given date
+    const parseTimeToDate = (dateStr, timeStr) => {
+      if (!timeStr) return null;
+      const match = String(timeStr).trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+      if (!match) return null;
+      let h = parseInt(match[1], 10);
+      const m = parseInt(match[2], 10);
+      const ampm = match[3].toUpperCase();
+      if (ampm === 'PM' && h !== 12) h += 12;
+      if (ampm === 'AM' && h === 12) h = 0;
+      const d = new Date(dateStr + 'T00:00:00');
+      if (isNaN(d.getTime())) return null;
+      d.setHours(h, m, 0, 0);
+      return d;
+    };
+
+    const enriched = participants.map(p => {
+      const slotEnd = parseTimeToDate(date, p.time_to);
+      const slotCompleted = slotEnd ? slotEnd < now : false;
+      const isAppeared = ['Completed', 'In Progress'].includes(p.round_status);
+      const certStatusStr = isAppeared ? (p.cert_status === 'Pass' ? 'Yes' : 'No') : '';
+      return { ...p, slotCompleted, isAppeared, certStatusStr };
+    });
+
+    // Dynamic roles
+    const rolesSet = [...new Set(enriched.map(p => p.role).filter(Boolean))].sort();
+    const roles = rolesSet.length ? rolesSet : ['Unknown'];
+    const numRoles = roles.length;
+
+    const wb = new ExcelJS.Workbook();
+
+    // ==========================================
+    // SHEET 1: SUMMARY
+    // ==========================================
+    const wsSummary = wb.addWorksheet('Summary');
+
+    const row1 = ['MAIN ROUND DATE', 'REGION'];
+    let colIdx = 2;
+
+    const groups = [
+      { label: 'Mapped', count: numRoles + 1 },
+      { label: 'Expected Attendance as per Last Time Slots', count: numRoles + 1 },
+      { label: 'Appeared', count: numRoles + 1 },
+      { label: 'Certified', count: numRoles + 1 },
+    ];
+
+    groups.forEach(g => { row1[colIdx] = g.label; colIdx += g.count; });
+    row1[colIdx] = 'Appeared %(As per Slots)'; colIdx++;
+    row1[colIdx] = '% (as per Mapped)'; colIdx++;
+    row1[colIdx] = 'Certified %';
+    for (let i = 0; i < row1.length; i++) if (row1[i] === undefined) row1[i] = '';
+    wsSummary.addRow(row1);
+
+    const row2 = ['', ''];
+    groups.forEach(() => { roles.forEach(r => row2.push(r)); row2.push('Total'); });
+    row2.push(''); row2.push('');
+    roles.forEach(r => row2.push(r));
+    row2.push('Total');
+    wsSummary.addRow(row2);
+
+    // Merge header groups
+    let mergeCol = 3;
+    groups.forEach(g => {
+      wsSummary.mergeCells(1, mergeCol, 1, mergeCol + g.count - 1);
+      mergeCol += g.count;
+    });
+    wsSummary.mergeCells(1, mergeCol, 2, mergeCol); mergeCol++;
+    wsSummary.mergeCells(1, mergeCol, 2, mergeCol); mergeCol++;
+    wsSummary.mergeCells(1, mergeCol, 1, mergeCol + numRoles);
+
+    wsSummary.mergeCells('A1:A2');
+    wsSummary.mergeCells('B1:B2');
+
+    [1, 2].forEach(r => {
+      wsSummary.getRow(r).eachCell({ includeEmpty: true }, cell => {
+        cell.font = { bold: true, size: 10, color: { argb: 'FF000000' } };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
+        cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+      });
+    });
+    wsSummary.getRow(1).height = 30;
+    wsSummary.getRow(2).height = 20;
+
+    const regions = [...new Set(enriched.map(p => p.region).filter(Boolean))].sort();
+
+    let gtMapped = Array(numRoles).fill(0), gtMappedT = 0;
+    let gtExpected = Array(numRoles).fill(0), gtExpectedT = 0;
+    let gtApp = Array(numRoles).fill(0), gtAppT = 0;
+    let gtCert = Array(numRoles).fill(0), gtCertT = 0;
+
+    const pctStartCol = 3 + 4 * (numRoles + 1);
+
+    regions.forEach(reg => {
+      const rRows = enriched.filter(p => p.region === reg);
+
+      const mapped   = roles.map(role => rRows.filter(p => p.role === role).length);
+      const expected = roles.map(role => rRows.filter(p => p.role === role && p.slotCompleted).length);
+      const app      = roles.map(role => rRows.filter(p => p.role === role && p.isAppeared).length);
+      const cert     = roles.map(role => rRows.filter(p => p.role === role && p.isAppeared && p.cert_status === 'Pass').length);
+
+      const tMap = mapped.reduce((a, b) => a + b, 0);
+      const tExp = expected.reduce((a, b) => a + b, 0);
+      const tApp = app.reduce((a, b) => a + b, 0);
+      const tCert = cert.reduce((a, b) => a + b, 0);
+
+      mapped.forEach((v, i) => gtMapped[i] += v); gtMappedT += tMap;
+      expected.forEach((v, i) => gtExpected[i] += v); gtExpectedT += tExp;
+      app.forEach((v, i) => gtApp[i] += v); gtAppT += tApp;
+      cert.forEach((v, i) => gtCert[i] += v); gtCertT += tCert;
+
+      const appPctSlots = tExp > 0 ? tApp / tExp : 0;
+      const appPctMapped = tMap > 0 ? tApp / tMap : 0;
+      const certPctPerRole = roles.map((r, i) => app[i] > 0 ? cert[i] / app[i] : 0);
+      const certPctTotal = tApp > 0 ? tCert / tApp : 0;
+
+      const row = wsSummary.addRow([
+        new Date(date + 'T00:00:00'), reg,
+        ...mapped, tMap,
+        ...expected, tExp,
+        ...app, tApp,
+        ...cert, tCert,
+        appPctSlots, appPctMapped,
+        ...certPctPerRole, certPctTotal
+      ]);
+
+      row.eachCell({ includeEmpty: true }, (cell, c) => {
+        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+        if (c === 1) cell.numFmt = 'dd-mmm-yy';
+      });
+
+      [pctStartCol, pctStartCol + 1,
+       ...Array.from({ length: numRoles + 1 }, (_, i) => pctStartCol + 2 + i)
+      ].forEach(ci => {
+        const cell = row.getCell(ci);
+        if (cell.value !== null && cell.value !== undefined) cell.numFmt = '0%';
+      });
+    });
+
+    // Grand total
+    const gtAppPctSlots = gtExpectedT > 0 ? gtAppT / gtExpectedT : 0;
+    const gtAppPctMapped = gtMappedT > 0 ? gtAppT / gtMappedT : 0;
+    const gtCertPctPerRole = roles.map((r, i) => gtApp[i] > 0 ? gtCert[i] / gtApp[i] : 0);
+    const gtCertPctTotal = gtAppT > 0 ? gtCertT / gtAppT : 0;
+
+    const gtRow = wsSummary.addRow([
+      'Grand Total', '',
+      ...gtMapped, gtMappedT,
+      ...gtExpected, gtExpectedT,
+      ...gtApp, gtAppT,
+      ...gtCert, gtCertT,
+      gtAppPctSlots, gtAppPctMapped,
+      ...gtCertPctPerRole, gtCertPctTotal
+    ]);
+
+    gtRow.eachCell({ includeEmpty: true }, cell => {
+      cell.font = { bold: true };
+      cell.alignment = { vertical: 'middle', horizontal: 'center' };
+      cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+    });
+    [pctStartCol, pctStartCol + 1,
+     ...Array.from({ length: numRoles + 1 }, (_, i) => pctStartCol + 2 + i)
+    ].forEach(ci => {
+      const cell = gtRow.getCell(ci);
+      if (cell.value !== null && cell.value !== undefined) cell.numFmt = '0%';
+    });
+
+    wsSummary.getColumn(1).width = 16;
+    wsSummary.getColumn(2).width = 10;
+    const lastSummaryCol = 2 + (numRoles + 1) * 4 + 2 + numRoles + 1;
+    for (let i = 3; i <= lastSummaryCol; i++) wsSummary.getColumn(i).width = 12;
+
+    // ==========================================
+    // SHEET 2: STATUS
+    // ==========================================
+    const wsStatus = wb.addWorksheet('Status');
+
+    wsStatus.columns = [
+      { header: 'S.NO.', key: 'sno', width: 8 },
+      { header: 'MAIN ROUND DATE', key: 'date', width: 16 },
+      { header: 'REGION', key: 'region', width: 10 },
+      { header: 'MSPIN', key: 'mpin', width: 15 },
+      { header: 'DEALER CODE', key: 'dealer_code', width: 18 },
+      { header: 'Dealer City', key: 'city', width: 18 },
+      { header: 'DEALER NAME', key: 'dealer_name', width: 40 },
+      { header: 'NAME', key: 'name', width: 28 },
+      { header: 'Eligible', key: 'role', width: 15 },
+      { header: 'Trainer Name', key: 'trainer_name', width: 22 },
+      { header: 'Agency', key: 'agency', width: 12 },
+      { header: 'Time From', key: 'time_from', width: 12 },
+      { header: 'Time To', key: 'time_to', width: 12 },
+      { header: 'Time Slots Completed', key: 'slot_completed', width: 20 },
+      { header: 'Appeared Status', key: 'appeared_status', width: 18 },
+      { header: 'Certified Status', key: 'cert_status', width: 18 }
+    ];
+
+    const hRow = wsStatus.getRow(1);
+    hRow.height = 30;
+    hRow.eachCell(cell => {
+      cell.font = { bold: true, size: 10, color: { argb: 'FF000000' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
+      cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+      cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+    });
+
+    enriched.forEach((p, idx) => {
+      const row = wsStatus.addRow({
+        sno: idx + 1,
+        date: new Date(date + 'T00:00:00'),
+        region: p.region,
+        mpin: Number(p.mpin),
+        dealer_code: p.dealer_code,
+        city: p.city,
+        dealer_name: p.dealer_name,
+        name: p.name,
+        role: p.role,
+        trainer_name: p.trainer_name || '—',
+        agency: p.agency || '—',
+        time_from: p.time_from,
+        time_to: p.time_to,
+        slot_completed: p.slotCompleted ? 'Yes' : '',
+        appeared_status: p.isAppeared ? 'Appeared' : 'Not Appeared',
+        cert_status: p.certStatusStr
+      });
+
+      row.eachCell({ includeEmpty: true }, cell => {
+        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+      });
+
+      row.getCell('date').numFmt = 'dd-mmm-yy';
+      row.getCell('dealer_name').alignment = { vertical: 'middle', horizontal: 'left' };
+      row.getCell('name').alignment = { vertical: 'middle', horizontal: 'left' };
+      row.getCell('city').alignment = { vertical: 'middle', horizontal: 'left' };
+    });
+
+    // ==========================================
+    // SEND RESPONSE
+    // ==========================================
+    const filename = `Nexa_Daily_Report_${date}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    await wb.xlsx.write(res);
+    res.end();
+
+  } catch (err) {
+    console.error('[exportNexaDailyReport]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+exports.getNexaFilters = async (req, res) => {
+  try {
+    const { project } = req.query;
+
+    // If no project selected → return list of distinct projects
+    if (!project) {
+      const [projects] = await pool.query(
+        `SELECT DISTINCT project_name
+         FROM participants
+         WHERE project_name IS NOT NULL AND project_name LIKE 'Nexa%'
+         ORDER BY project_name`
+      );
+
+      return res.json({
+        success: true,
+        projects: projects.map(p => p.project_name)
+      });
+    }
+
+    // If project given → return distinct dates for that project
+    const [dates] = await pool.query(
+      `SELECT DISTINCT date
+       FROM participants
+       WHERE project_name = ?
+         AND date IS NOT NULL
+       ORDER BY date DESC`,
+      [project]
+    );
+
+    return res.json({
+      success: true,
+      project,
+      dates: dates.map(d => d.date)
+    });
+
+  } catch (err) {
+    console.error('[getNexaFilters]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+exports.exportNexaOverallAttendance = async (req, res) => {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0); // normalize to start of day
+    
+    // Fetch ALL Nexa data
+    const [participants] = await pool.query(
+      `SELECT 
+          p.*,
+          d.round_status,
+          t.name          AS faculty,
+          t.agency,
+          t.base_location
+       FROM participants p
+       LEFT JOIN dashboard d ON d.mpin = p.mpin
+       LEFT JOIN trainers  t ON t.username = p.trainer_id
+       WHERE p.project_name LIKE 'Nexa%'
+       ORDER BY p.date DESC, p.region, STR_TO_DATE(p.time_from, '%h:%i %p'), p.mpin`,
+      []
+    );
+
+    if (!participants.length) {
+      return res.status(404).json({ success: false, error: 'No data found' });
+    }
+
+    const wb = new ExcelJS.Workbook();
+
+    const buildSheet = (sheetName, eligibleHeader, levelRows) => {
+      const ws = wb.addWorksheet(sheetName);
+      
+      ws.columns = [
+        { header: 'S.NO.',            key: 'sno',           width: 8 },
+        { header: 'Level',            key: 'level',         width: 8 },
+        { header: 'REGION',           key: 'region',        width: 10 },
+        { header: 'MSPIN',            key: 'mpin',          width: 15 },
+        { header: 'DEALER CODE',      key: 'dealer_code',   width: 18 },
+        { header: 'Dealer City',      key: 'city',          width: 18 },
+        { header: 'DEALER NAME',      key: 'dealer_name',   width: 40 },
+        { header: 'NAME',             key: 'name',          width: 28 },
+        { header: eligibleHeader,     key: 'eligible',      width: 16 },
+        { header: 'Date',             key: 'date',          width: 14 },
+        { header: 'Agency',           key: 'agency',        width: 12 },
+        { header: 'Faculty',          key: 'faculty',       width: 22 },
+        { header: 'Base location',    key: 'base_location', width: 20 },
+        { header: 'Time From',        key: 'time_from',     width: 12 },
+        { header: 'Time To',          key: 'time_to',       width: 12 },
+        { header: 'Attendance',       key: 'attendance',    width: 18 }
+      ];
+      
+      const headerRow = ws.getRow(1);
+      headerRow.height = 30;
+      headerRow.eachCell(cell => {
+        cell.font = { bold: true, size: 10, color: { argb: 'FF000000' } };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
+        cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        cell.border = {
+          top: { style: 'thin' }, left: { style: 'thin' },
+          bottom: { style: 'thin' }, right: { style: 'thin' }
+        };
+      });
+      
+      levelRows.forEach((p, idx) => {
+        const participantDate = p.date ? new Date(p.date) : null;
+        if (participantDate) participantDate.setHours(0, 0, 0, 0);
+        
+        const appeared = ['Completed', 'In Progress'].includes(p.round_status);
+        
+        let attendanceStatus;
+        if (appeared) {
+          attendanceStatus = 'Appeared';
+        } else if (participantDate && participantDate > today) {
+          attendanceStatus = 'Pending';
+        } else {
+          attendanceStatus = 'Absent';
+        }
+        
+        const row = ws.addRow({
+          sno:           idx + 1,
+          level:         p.level,
+          region:        p.region,
+          mpin:          Number(p.mpin),
+          dealer_code:   p.dealer_code,
+          city:          p.city,
+          dealer_name:   p.dealer_name,
+          name:          p.name,
+          eligible:      p.role || '',
+          date:          participantDate,
+          agency:        p.agency || '—',
+          faculty:       p.faculty || '—',
+          base_location: p.base_location || '—',
+          time_from:     p.time_from,
+          time_to:       p.time_to,
+          attendance:    attendanceStatus
+        });
+        
+        row.eachCell({ includeEmpty: true }, cell => {
+          cell.alignment = { vertical: 'middle', horizontal: 'center' };
+          cell.border = {
+            top: { style: 'thin' }, left: { style: 'thin' },
+            bottom: { style: 'thin' }, right: { style: 'thin' }
+          };
+        });
+        
+        row.getCell('dealer_name').alignment   = { vertical: 'middle', horizontal: 'left' };
+        row.getCell('name').alignment          = { vertical: 'middle', horizontal: 'left' };
+        row.getCell('city').alignment          = { vertical: 'middle', horizontal: 'left' };
+        row.getCell('faculty').alignment       = { vertical: 'middle', horizontal: 'left' };
+        row.getCell('base_location').alignment = { vertical: 'middle', horizontal: 'left' };
+        
+        if (row.getCell('date').value) {
+          row.getCell('date').numFmt = 'dd-mmm-yy';
+        }
+      });
+      
+      ws.views = [{ state: 'frozen', ySplit: 1 }];
+      ws.autoFilter = { from: 'A1', to: `P${levelRows.length + 1}` };
+    };
+
+    const l1Rows = participants.filter(p => p.level === 'L1');
+    const l2Rows = participants.filter(p => p.level === 'L2');
+
+    if (l1Rows.length) {
+      buildSheet('L1_Eligible', 'L1_Eligible', l1Rows);
+    }
+    if (l2Rows.length) {
+      buildSheet('L2_Eligible', 'L2_Eligible', l2Rows);
+    }
+    if (!l1Rows.length && !l2Rows.length) {
+      buildSheet('Nexa', 'Eligible', participants);
+    }
+
+    const dateStr = today.toISOString().split('T')[0];
+    const filename = `Nexa_Overall_Attendance_${dateStr}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    await wb.xlsx.write(res);
+    res.end();
+
+  } catch (err) {
+    console.error('[exportNexaOverallAttendance]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+exports.exportNexaOverallResult = async (req, res) => {
+  try {
+    const { project } = req.query;
+
+    if (!project) {
+      return res.status(400).json({ success: false, error: 'Project query parameter is required' });
+    }
+
+    // --- 1. FETCH DATA SEPARATELY TO PREVENT DATA LOSS ---
+    
+    const [r1Data] = await pool.query(
+      `SELECT region, role AS eligible, appeared_status AS r1_appeared 
+       FROM round_1 
+       WHERE project_name = ?`, 
+      [project]
+    );
+
+    const [mainData] = await pool.query(
+      `SELECT p.region, p.role AS eligible, 
+              IFNULL(d.marks, 0) AS main_round, 
+              d.status AS main_cert_status, 
+              d.round_status AS main_round_status
+       FROM participants p
+       LEFT JOIN dashboard d ON d.mpin = p.mpin
+       WHERE p.project_name = ?`, 
+      [project]
+    );
+
+    const [participants] = await pool.query(
+      `SELECT p.date AS main_round_date,
+              p.region AS region, 
+              p.mpin, p.dealer_code, p.city AS dealer_city,
+              p.dealer_name, p.name, p.role AS eligible, 
+              r1.appeared_status AS r1_appeared,
+              CASE WHEN d.round_status IN ('Completed', 'In Progress') THEN 'Appeared' ELSE 'Not Appeared' END AS appeared_status,
+              IFNULL(d.marks, 0) AS main_round,
+              CASE WHEN d.status = 'Pass' THEN 'Yes' ELSE 'No' END AS certified_status
+       FROM participants p
+       LEFT JOIN round_1 r1 ON r1.mpin = p.mpin
+       LEFT JOIN dashboard d ON d.mpin = p.mpin
+       WHERE p.project_name = ?
+       ORDER BY p.date DESC, p.region, p.mpin`,
+      [project]
+    );
+
+    if (!participants.length) {
+      return res.status(404).json({ success: false, error: 'No data found for this project' });
+    }
+
+    const wb = new ExcelJS.Workbook();
+    
+    const roles = [...new Set([...r1Data.map(r => r.eligible), ...mainData.map(r => r.eligible)].filter(Boolean))].sort();
+    const numRoles = roles.length;
+
+    // ==========================================
+    // SHEET 1: SUMMARY
+    // ==========================================
+    const wsSummary = wb.addWorksheet('Summary');
+
+    const header1 = [
+      'REGION', 
+      'Eligible (R1)', ...Array(numRoles).fill(''),
+      'R1 Appeared', ...Array(numRoles).fill(''),
+      'Eligible Main Round', ...Array(numRoles).fill(''),
+      'Appeared Main Round', ...Array(numRoles).fill(''),
+      'Certified Main Round', ...Array(numRoles).fill(''),
+      'Certified % From Appeared', 'Certified % from R1 Eligible'
+    ];
+
+    const header2 = [
+      '', ...roles, 'Total', ...roles, 'Total', ...roles, 'Total', ...roles, 'Total', ...roles, 'Total', '', ''
+    ];
+
+    wsSummary.addRow(header1);
+    wsSummary.addRow(header2);
+
+    wsSummary.mergeCells('A1:A2');
+    let col = 2;
+    for(let i=0; i<5; i++) { wsSummary.mergeCells(1, col, 1, col + numRoles); col += numRoles + 1; }
+    wsSummary.mergeCells(1, col, 2, col); col += 1;
+    wsSummary.mergeCells(1, col, 2, col);
+
+    [1, 2].forEach(rowNum => {
+      wsSummary.getRow(rowNum).eachCell({ includeEmpty: true }, (cell) => {
+        cell.font = { bold: true, size: 10, color: { argb: 'FF000000' } };
+        cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
+      });
+    });
+
+    const regions = [...new Set([...r1Data.map(r => r.region), ...mainData.map(r => r.region)])].filter(Boolean).sort();
+
+    let gt = Array(5).fill().map(() => Array(numRoles).fill(0));
+    let gtT = Array(5).fill(0);
+
+    const summaryRows = [];
+
+    regions.forEach(region => {
+      const r1Rows = r1Data.filter(r => r.region === region);
+      const mRows = mainData.filter(r => r.region === region);
+
+      const eligR1 = roles.map(role => r1Rows.filter(r => r.eligible === role).length);
+      const appR1 = roles.map(role => r1Rows.filter(r => r.eligible === role && r.r1_appeared === 'Appeared').length);
+      const eligMain = roles.map(role => mRows.filter(r => r.eligible === role).length);
+      const appMain = roles.map(role => mRows.filter(r => r.eligible === role && ['Completed', 'In Progress'].includes(r.main_round_status)).length);
+      const certMain = roles.map(role => mRows.filter(r => r.eligible === role && r.main_cert_status === 'Pass').length);
+
+      const totEligR1 = eligR1.reduce((a, b) => a + b, 0);
+      const totAppR1 = appR1.reduce((a, b) => a + b, 0);
+      const totEligMain = eligMain.reduce((a, b) => a + b, 0);
+      const totAppMain = appMain.reduce((a, b) => a + b, 0);
+      const totCert = certMain.reduce((a, b) => a + b, 0);
+
+      [eligR1, appR1, eligMain, appMain, certMain].forEach((arr, i) => {
+        arr.forEach((v, j) => gt[i][j] += v);
+        gtT[i] += arr.reduce((a,b)=>a+b, 0);
+      });
+
+      summaryRows.push([
+        region,
+        ...eligR1, totEligR1,
+        ...appR1, totAppR1,
+        ...eligMain, totEligMain,
+        ...appMain, totAppMain,
+        ...certMain, totCert,
+        totAppMain > 0 ? totCert / totAppMain : 0,
+        totEligR1 > 0 ? totCert / totEligR1 : 0
+      ]);
+    });
+
+    summaryRows.push([
+      'Grand Total',
+      ...gt[0], gtT[0],
+      ...gt[1], gtT[1],
+      ...gt[2], gtT[2],
+      ...gt[3], gtT[3],
+      ...gt[4], gtT[4],
+      gtT[3] > 0 ? gtT[4] / gtT[3] : 0,
+      gtT[0] > 0 ? gtT[4] / gtT[0] : 0
+    ]);
+
+    summaryRows.forEach((data, idx) => {
+      const r = wsSummary.addRow(data);
+      const isGrand = idx === summaryRows.length - 1;
+      r.eachCell({ includeEmpty: true }, (cell, colNum) => {
+        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+        if (isGrand) cell.font = { bold: true };
+        
+        if (colNum >= 2 + (numRoles + 1) * 5) {
+          cell.numFmt = '0%';
+        }
+      });
+    });
+
+    // ==========================================
+    // SHEET 2: STATUS (Detailed)
+    // ==========================================
+    const wsStatus = wb.addWorksheet('Status');
+    
+    wsStatus.columns = [
+      { header: 'S.NO.', key: 'sno', width: 8 },
+      { header: 'MAIN ROUND DATE', key: 'main_round_date', width: 18 },
+      { header: 'REGION', key: 'region', width: 10 },
+      { header: 'MSPIN', key: 'mpin', width: 15 },
+      { header: 'DEALER CODE', key: 'dealer_code', width: 15 },
+      { header: 'Dealer City', key: 'dealer_city', width: 18 },
+      { header: 'DEALER NAME', key: 'dealer_name', width: 45 },
+      { header: 'NAME', key: 'name', width: 25 },
+      { header: 'Eligible', key: 'eligible', width: 18 },
+      { header: 'Status', key: 'appeared_status', width: 18 },
+      { header: 'Main Round', key: 'main_round', width: 12 },
+      { header: 'Certified Status', key: 'certified_status', width: 18 }
+    ];
+
+    const hRow = wsStatus.getRow(1);
+    hRow.height = 30;
+    hRow.eachCell((cell) => {
+      cell.font = { bold: true, color: { argb: 'FF000000' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
+      cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+      cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+    });
+
+    participants.forEach((r, idx) => {
+      const isAppeared = r.appeared_status === 'Appeared';
+      const displayScore = isAppeared ? Number(r.main_round): '';
+      const displayCertified = isAppeared ? r.certified_status : '';
+
+      const row = wsStatus.addRow({
+        sno: idx + 1,
+        main_round_date: r.main_round_date ? new Date(r.main_round_date) : '',
+        region: r.region, mpin: Number(r.mpin), dealer_code: r.dealer_code, dealer_city: r.dealer_city,
+        dealer_name: r.dealer_name, name: r.name, eligible: r.eligible,
+        appeared_status: r.appeared_status, main_round: displayScore, certified_status: displayCertified
+      });
+
+      row.eachCell({ includeEmpty: true }, (cell) => {
+        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+      });
+
+      if (row.getCell('main_round_date').value) row.getCell('main_round_date').numFmt = 'dd-mmm-yy';
+      row.getCell('dealer_name').alignment = { vertical: 'middle', horizontal: 'left' };
+      row.getCell('name').alignment = { vertical: 'middle', horizontal: 'left' };
+    });
+
+    const safeProject = String(project).replace(/[^a-z0-9]+/gi, '_');
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="Nexa_Overall_Result_${safeProject}.xlsx"`);
+    
+    await wb.xlsx.write(res);
+    res.end();
+
+  } catch (err) {
+    console.error('[exportNexaOverallResult]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
 
 exports.downloadRound1Sample = async (req, res) => {
   try {
