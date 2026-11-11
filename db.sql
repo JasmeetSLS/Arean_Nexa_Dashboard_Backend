@@ -1,7 +1,7 @@
 -- --------------------------------------------------------
--- Host:                         localhost
--- Server version:               8.0.43 - MySQL Community Server - GPL
--- Server OS:                    Win64
+-- Host:                         192.168.10.194
+-- Server version:               10.11.14-MariaDB-0+deb12u2 - Debian 12
+-- Server OS:                    debian-linux-gnu
 -- HeidiSQL Version:             12.21.0.7344
 -- --------------------------------------------------------
 
@@ -16,84 +16,83 @@
 
 
 -- Dumping database structure for skill_contest_portal
-CREATE DATABASE IF NOT EXISTS `skill_contest_portal` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci */ /*!80016 DEFAULT ENCRYPTION='N' */;
+CREATE DATABASE IF NOT EXISTS `skill_contest_portal` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci */;
 USE `skill_contest_portal`;
 
 -- Dumping structure for table skill_contest_portal.admin
 CREATE TABLE IF NOT EXISTS `admin` (
-  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
   `username` varchar(60) NOT NULL,
   `password` varchar(255) NOT NULL,
   `status` enum('active','inactive') NOT NULL DEFAULT 'active',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_admin_name` (`username`)
-) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
 
 -- Dumping structure for table skill_contest_portal.admin_permission
 CREATE TABLE IF NOT EXISTS `admin_permission` (
-  `id` int unsigned NOT NULL AUTO_INCREMENT,
-  `admin_id` int unsigned NOT NULL,
-  `allowed_roles` json NOT NULL,
-  `allowed_zones` json NOT NULL,
-  `allowed_regions` json NOT NULL,
-  `allowed_projects` json NOT NULL,
-  `permissions` json NOT NULL,
-  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `admin_id` int(10) unsigned NOT NULL,
+  `allowed_roles` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL CHECK (json_valid(`allowed_roles`)),
+  `allowed_regions` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL CHECK (json_valid(`allowed_regions`)),
+  `allowed_projects` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL CHECK (json_valid(`allowed_projects`)),
+  `permissions` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL CHECK (json_valid(`permissions`)),
+  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_admin` (`admin_id`),
   CONSTRAINT `fk_ap_admin` FOREIGN KEY (`admin_id`) REFERENCES `admin` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
 
 -- Dumping structure for table skill_contest_portal.chat_messages
 CREATE TABLE IF NOT EXISTS `chat_messages` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
   `sender_type` enum('admin','trainer') NOT NULL,
-  `sender_id` int NOT NULL,
+  `sender_id` int(11) NOT NULL,
   `receiver_type` enum('admin','trainer') NOT NULL,
-  `receiver_id` int NOT NULL,
+  `receiver_id` int(11) NOT NULL,
   `message` text NOT NULL,
-  `is_read` tinyint(1) DEFAULT '0',
-  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `is_read` tinyint(1) DEFAULT 0,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
   PRIMARY KEY (`id`),
   KEY `idx_sender` (`sender_type`,`sender_id`,`id`),
   KEY `idx_receiver` (`receiver_type`,`receiver_id`,`id`),
   KEY `idx_unread` (`receiver_type`,`receiver_id`,`is_read`)
-) ENGINE=InnoDB AUTO_INCREMENT=45 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=61 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
 
 -- Dumping structure for table skill_contest_portal.dashboard
 CREATE TABLE IF NOT EXISTS `dashboard` (
-  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
   `mpin` varchar(20) NOT NULL,
   `trainer_id` varchar(60) DEFAULT NULL,
   `project_name` varchar(150) DEFAULT NULL,
-  `marks` decimal(10,2) NOT NULL DEFAULT '0.00',
-  `max_marks` decimal(10,2) NOT NULL DEFAULT '100.00',
-  `completed` int NOT NULL DEFAULT '0',
-  `required` int NOT NULL DEFAULT '5',
-  `percentage` decimal(5,2) NOT NULL DEFAULT '0.00',
+  `marks` decimal(10,2) NOT NULL DEFAULT 0.00,
+  `max_marks` decimal(10,2) NOT NULL DEFAULT 100.00,
+  `completed` int(11) NOT NULL DEFAULT 0,
+  `required` int(11) NOT NULL DEFAULT 5,
+  `percentage` decimal(5,2) NOT NULL DEFAULT 0.00,
   `status` enum('Pass','Fail') NOT NULL DEFAULT 'Fail',
   `round_status` enum('In Progress','Completed') NOT NULL DEFAULT 'In Progress',
   `delay_status` enum('On Time','Delay') NOT NULL DEFAULT 'On Time',
   `total_time` varchar(10) DEFAULT '00:00:00',
-  `total_secs` int NOT NULL DEFAULT '0',
-  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `total_secs` int(11) NOT NULL DEFAULT 0,
+  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_dashboard_mpin` (`mpin`),
   KEY `idx_dashboard_trainer` (`trainer_id`),
   KEY `idx_dashboard_project` (`project_name`)
-) ENGINE=InnoDB AUTO_INCREMENT=9619 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=9641 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
 
 -- Dumping structure for table skill_contest_portal.participant_rounds
 CREATE TABLE IF NOT EXISTS `participant_rounds` (
-  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
   `mpin` varchar(20) NOT NULL,
   `trainer_id` varchar(120) DEFAULT NULL,
   `round_name` varchar(50) NOT NULL,
@@ -102,13 +101,25 @@ CREATE TABLE IF NOT EXISTS `participant_rounds` (
   `end_time` datetime DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `idx_round_mspin` (`mpin`)
-) ENGINE=InnoDB AUTO_INCREMENT=41826 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=41981 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Data exporting was unselected.
+
+-- Dumping structure for table skill_contest_portal.participant_rounds_logs
+CREATE TABLE IF NOT EXISTS `participant_rounds_logs` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `mpin` varchar(20) DEFAULT NULL,
+  `round_name` varchar(100) DEFAULT NULL,
+  `payload` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`payload`)),
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=2384 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
 
 -- Dumping structure for table skill_contest_portal.participants
 CREATE TABLE IF NOT EXISTS `participants` (
-  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
   `project_name` varchar(150) DEFAULT NULL,
   `level` varchar(50) DEFAULT NULL,
   `mpin` varchar(20) NOT NULL,
@@ -116,7 +127,6 @@ CREATE TABLE IF NOT EXISTS `participants` (
   `dob` date DEFAULT NULL,
   `role` varchar(50) DEFAULT NULL,
   `region` varchar(50) DEFAULT NULL,
-  `zone` varchar(30) DEFAULT NULL,
   `city` varchar(80) DEFAULT NULL,
   `dealer_name` varchar(80) DEFAULT NULL,
   `dealer_code` varchar(20) DEFAULT NULL,
@@ -125,38 +135,38 @@ CREATE TABLE IF NOT EXISTS `participants` (
   `date` date DEFAULT NULL,
   `time_from` varchar(15) DEFAULT NULL,
   `time_to` varchar(15) DEFAULT NULL,
-  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_user_mspin` (`mpin`)
-) ENGINE=InnoDB AUTO_INCREMENT=9969 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=9981 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
 
 -- Dumping structure for table skill_contest_portal.project_round_config
 CREATE TABLE IF NOT EXISTS `project_round_config` (
-  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
   `project_name` varchar(150) NOT NULL,
-  `total_rounds` tinyint unsigned NOT NULL DEFAULT '5',
-  `rounds` json DEFAULT NULL,
-  `total_score` decimal(10,2) NOT NULL DEFAULT '100.00',
-  `passing_percentage` decimal(5,2) NOT NULL DEFAULT '80.00',
+  `total_rounds` tinyint(3) unsigned NOT NULL DEFAULT 5,
+  `rounds` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`rounds`)),
+  `total_score` decimal(10,2) NOT NULL DEFAULT 100.00,
+  `passing_percentage` decimal(5,2) NOT NULL DEFAULT 80.00,
   `trainer_time` time DEFAULT '00:20:00',
-  `trainer_time_secs` int unsigned NOT NULL DEFAULT '4800',
+  `trainer_time_secs` int(10) unsigned NOT NULL DEFAULT 4800,
   `status` enum('active','inactive') NOT NULL DEFAULT 'active',
-  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_project` (`project_name`),
-  CONSTRAINT `chk_pass_pct` CHECK ((`passing_percentage` between 0 and 100)),
-  CONSTRAINT `chk_rounds` CHECK ((`total_rounds` between 1 and 20))
-) ENGINE=InnoDB AUTO_INCREMENT=9 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+  CONSTRAINT `chk_pass_pct` CHECK (`passing_percentage` between 0 and 100),
+  CONSTRAINT `chk_rounds` CHECK (`total_rounds` between 1 and 20)
+) ENGINE=InnoDB AUTO_INCREMENT=9 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
 
 -- Dumping structure for table skill_contest_portal.round_1
 CREATE TABLE IF NOT EXISTS `round_1` (
-  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
   `mpin` varchar(20) NOT NULL,
   `round_1_date` date DEFAULT NULL,
   `project_name` varchar(150) DEFAULT NULL,
@@ -167,14 +177,14 @@ CREATE TABLE IF NOT EXISTS `round_1` (
   `dealer_name` varchar(150) DEFAULT NULL,
   `role` varchar(50) DEFAULT NULL,
   `appeared_status` enum('Appeared','Not Appeared') NOT NULL DEFAULT 'Not Appeared',
-  `category_score` longtext,
+  `category_score` longtext DEFAULT NULL,
   `total_r1` decimal(10,2) DEFAULT NULL,
   `result` enum('Pass','Fail') DEFAULT NULL,
-  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_round1_mpin` (`mpin`)
-) ENGINE=InnoDB AUTO_INCREMENT=10883 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=10883 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
 
@@ -262,7 +272,7 @@ DELIMITER ;
 
 -- Dumping structure for table skill_contest_portal.trainers
 CREATE TABLE IF NOT EXISTS `trainers` (
-  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
   `name` varchar(120) NOT NULL,
   `agency` varchar(500) DEFAULT NULL,
   `base_location` varchar(500) DEFAULT NULL,
@@ -272,7 +282,7 @@ CREATE TABLE IF NOT EXISTS `trainers` (
   `status` enum('active','inactive') NOT NULL DEFAULT 'active',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_trainer_username` (`username`)
-) ENGINE=InnoDB AUTO_INCREMENT=593 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=593 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
 
