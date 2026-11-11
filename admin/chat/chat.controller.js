@@ -1,8 +1,32 @@
 const pool = require('../../config/db');
 
-/* =====================================================================
-   GET /api/chat/users
-   ===================================================================== */
+exports.getMe = async (req, res) => {
+  try {
+    const { userId, type } = req.user; // req.user is set by your auth middleware
+    let user = { userId, type, username: 'Unknown', photoUrl: null };
+
+    if (type === 'admin') {
+      const [rows] = await pool.query(
+        `SELECT username FROM admin WHERE id = ? LIMIT 1`, [userId]
+      );
+      if (rows.length) user.username = rows[0].username;
+      
+    } else if (type === 'trainer') {
+      const [rows] = await pool.query(
+        `SELECT name AS username, photo_url AS photoUrl FROM trainers WHERE id = ? LIMIT 1`, [userId]
+      );
+      if (rows.length) {
+        user.username = rows[0].username;
+        user.photoUrl = rows[0].photoUrl;
+      }
+    }
+
+    res.json({ success: true, user });
+  } catch (err) {
+    console.error('[getMe Error]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
 exports.getChatUsers = async (req, res) => {
   try {
     const userId = req.user.userId;
