@@ -3403,15 +3403,7 @@ exports.exportNexaOverallResult = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Project query parameter is required' });
     }
 
-    // --- 1. FETCH DATA SEPARATELY TO PREVENT DATA LOSS ---
-    
-    const [r1Data] = await pool.query(
-      `SELECT region, role AS eligible, appeared_status AS r1_appeared 
-       FROM round_1 
-       WHERE project_name = ?`, 
-      [project]
-    );
-
+    // --- 1. FETCH DATA (No need for R1 data anymore) ---
     const [mainData] = await pool.query(
       `SELECT p.region, p.role AS eligible, 
               IFNULL(d.marks, 0) AS main_round, 
@@ -3428,12 +3420,10 @@ exports.exportNexaOverallResult = async (req, res) => {
               p.region AS region, 
               p.mpin, p.dealer_code, p.city AS dealer_city,
               p.dealer_name, p.name, p.role AS eligible, 
-              r1.appeared_status AS r1_appeared,
               CASE WHEN d.round_status IN ('Completed', 'In Progress') THEN 'Appeared' ELSE 'Not Appeared' END AS appeared_status,
               IFNULL(d.marks, 0) AS main_round,
               CASE WHEN d.status = 'Pass' THEN 'Yes' ELSE 'No' END AS certified_status
        FROM participants p
-       LEFT JOIN round_1 r1 ON r1.mpin = p.mpin
        LEFT JOIN dashboard d ON d.mpin = p.mpin
        WHERE p.project_name = ?
        ORDER BY p.date DESC, p.region, p.mpin`,
@@ -3446,7 +3436,7 @@ exports.exportNexaOverallResult = async (req, res) => {
 
     const wb = new ExcelJS.Workbook();
     
-    const roles = [...new Set([...r1Data.map(r => r.eligible), ...mainData.map(r => r.eligible)].filter(Boolean))].sort();
+    const roles = [...new Set(mainData.map(r => r.eligible).filter(Boolean))].sort();
     const numRoles = roles.length;
 
     // ==========================================
@@ -3454,18 +3444,18 @@ exports.exportNexaOverallResult = async (req, res) => {
     // ==========================================
     const wsSummary = wb.addWorksheet('Summary');
 
+    // ✅ REMOVED: Eligible (R1) & R1 Appeared from header1
     const header1 = [
       'REGION', 
-      'Eligible (R1)', ...Array(numRoles).fill(''),
-      'R1 Appeared', ...Array(numRoles).fill(''),
       'Eligible Main Round', ...Array(numRoles).fill(''),
       'Appeared Main Round', ...Array(numRoles).fill(''),
       'Certified Main Round', ...Array(numRoles).fill(''),
-      'Certified % From Appeared', 'Certified % from R1 Eligible'
+      'Certified % From Appeared' // ✅ REMOVED: Certified % from R1 Eligible
     ];
 
+    // ✅ REMOVED: R1 columns from header2
     const header2 = [
-      '', ...roles, 'Total', ...roles, 'Total', ...roles, 'Total', ...roles, 'Total', ...roles, 'Total', '', ''
+      '', ...roles, 'Total', ...roles, 'Total', ...roles, 'Total', ''
     ];
 
     wsSummary.addRow(header1);
@@ -3473,8 +3463,8 @@ exports.exportNexaOverallResult = async (req, res) => {
 
     wsSummary.mergeCells('A1:A2');
     let col = 2;
-    for(let i=0; i<5; i++) { wsSummary.mergeCells(1, col, 1, col + numRoles); col += numRoles + 1; }
-    wsSummary.mergeCells(1, col, 2, col); col += 1;
+    // ✅ Changed loop from 5 to 3 (Eligible, Appeared, Certified)
+    for(let i=0; i<3; i++) { wsSummary.mergeCells(1, col, 1, col + numRoles); col += numRoles + 1; }
     wsSummary.mergeCells(1, col, 2, col);
 
     [1, 2].forEach(rowNum => {
@@ -3486,43 +3476,36 @@ exports.exportNexaOverallResult = async (req, res) => {
       });
     });
 
-    const regions = [...new Set([...r1Data.map(r => r.region), ...mainData.map(r => r.region)])].filter(Boolean).sort();
+    const regions = [...new Set(mainData.map(r => r.region))].filter(Boolean).sort();
 
-    let gt = Array(5).fill().map(() => Array(numRoles).fill(0));
-    let gtT = Array(5).fill(0);
+    // ✅ Changed gt array size from 5 to 3
+    let gt = Array(3).fill().map(() => Array(numRoles).fill(0));
+    let gtT = Array(3).fill(0);
 
     const summaryRows = [];
 
     regions.forEach(region => {
-      const r1Rows = r1Data.filter(r => r.region === region);
       const mRows = mainData.filter(r => r.region === region);
 
-      const eligR1 = roles.map(role => r1Rows.filter(r => r.eligible === role).length);
-      const appR1 = roles.map(role => r1Rows.filter(r => r.eligible === role && r.r1_appeared === 'Appeared').length);
       const eligMain = roles.map(role => mRows.filter(r => r.eligible === role).length);
       const appMain = roles.map(role => mRows.filter(r => r.eligible === role && ['Completed', 'In Progress'].includes(r.main_round_status)).length);
       const certMain = roles.map(role => mRows.filter(r => r.eligible === role && r.main_cert_status === 'Pass').length);
 
-      const totEligR1 = eligR1.reduce((a, b) => a + b, 0);
-      const totAppR1 = appR1.reduce((a, b) => a + b, 0);
       const totEligMain = eligMain.reduce((a, b) => a + b, 0);
       const totAppMain = appMain.reduce((a, b) => a + b, 0);
       const totCert = certMain.reduce((a, b) => a + b, 0);
 
-      [eligR1, appR1, eligMain, appMain, certMain].forEach((arr, i) => {
+      [eligMain, appMain, certMain].forEach((arr, i) => {
         arr.forEach((v, j) => gt[i][j] += v);
         gtT[i] += arr.reduce((a,b)=>a+b, 0);
       });
 
       summaryRows.push([
         region,
-        ...eligR1, totEligR1,
-        ...appR1, totAppR1,
         ...eligMain, totEligMain,
         ...appMain, totAppMain,
         ...certMain, totCert,
-        totAppMain > 0 ? totCert / totAppMain : 0,
-        totEligR1 > 0 ? totCert / totEligR1 : 0
+        totAppMain > 0 ? totCert / totAppMain : 0
       ]);
     });
 
@@ -3531,10 +3514,7 @@ exports.exportNexaOverallResult = async (req, res) => {
       ...gt[0], gtT[0],
       ...gt[1], gtT[1],
       ...gt[2], gtT[2],
-      ...gt[3], gtT[3],
-      ...gt[4], gtT[4],
-      gtT[3] > 0 ? gtT[4] / gtT[3] : 0,
-      gtT[0] > 0 ? gtT[4] / gtT[0] : 0
+      gtT[1] > 0 ? gtT[2] / gtT[1] : 0
     ]);
 
     summaryRows.forEach((data, idx) => {
@@ -3545,7 +3525,8 @@ exports.exportNexaOverallResult = async (req, res) => {
         cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
         if (isGrand) cell.font = { bold: true };
         
-        if (colNum >= 2 + (numRoles + 1) * 5) {
+        // ✅ Fixed formatting check for the last column
+        if (colNum >= 2 + (numRoles + 1) * 3) {
           cell.numFmt = '0%';
         }
       });
