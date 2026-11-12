@@ -1,99 +1,100 @@
 const pool = require('../../config/db');
 
+/* =========================================================
+   GET /api/chat/me
+   ========================================================= */
 exports.getMe = async (req, res) => {
   try {
-    const { userId, type } = req.user; // req.user is set by your auth middleware
-    let user = { userId, type, username: 'Unknown', photoUrl: null };
+    const { username, type } = req.user;
+    let user = { username, displayName: username, type, photoUrl: null };
 
     if (type === 'admin') {
       const [rows] = await pool.query(
-        `SELECT username FROM admin WHERE id = ? LIMIT 1`, [userId]
-      );
-      if (rows.length) user.username = rows[0].username;
-      
-    } else if (type === 'trainer') {
-      const [rows] = await pool.query(
-        `SELECT name AS username, photo_url AS photoUrl FROM trainers WHERE id = ? LIMIT 1`, [userId]
+        `SELECT username FROM admin WHERE username = ? LIMIT 1`,
+        [username]
       );
       if (rows.length) {
-        user.username = rows[0].username;
-        user.photoUrl = rows[0].photoUrl;
+        user.username    = rows[0].username;
+        user.displayName = rows[0].username;
+      }
+    } else if (type === 'trainer') {
+      const [rows] = await pool.query(
+        `SELECT username, name, photo_url
+           FROM trainers WHERE username = ? LIMIT 1`,
+        [username]
+      );
+      if (rows.length) {
+        user.username    = rows[0].username;
+        user.displayName = rows[0].name || rows[0].username;
+        user.photoUrl    = rows[0].photo_url;
       }
     }
 
     res.json({ success: true, user });
   } catch (err) {
-    console.error('[getMe Error]', err);
+    console.error('[chat.getMe]', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };
 
+/* =========================================================
+   GET /api/chat/users   (search)
+   ========================================================= */
 exports.getChatUsers = async (req, res) => {
   try {
-    const userId = req.user.userId;
-    const type   = req.user.type;
-    const search = req.query.search ? `%${req.query.search}%` : null; // ✅ Get search param
-
-    let otherType;
-    if (type === 'admin') otherType = 'trainer';
-    else                  otherType = 'admin';
+    const { username, type } = req.user;
+    const otherType = type === 'admin' ? 'trainer' : 'admin';
+    const search    = req.query.search ? `%${req.query.search}%` : null;
 
     let people;
     if (type === 'admin') {
-      let sql = `SELECT id, name AS username, photo_url FROM trainers`;
-      let params = [];
-      
-      if (search) {
-        sql += ` WHERE name LIKE ?`;
-        params.push(search);
-      }
+      let sql = `SELECT username AS peerUsername, name AS peerName, photo_url
+                   FROM trainers WHERE status = 'active'`;
+      const params = [];
+      if (search) { sql += ` AND name LIKE ?`; params.push(search); }
       sql += ` ORDER BY name`;
-      
-      const [rows] = await pool.query(sql, params);
-      people = rows;
+      [people] = await pool.query(sql, params);
     } else {
-      let sql = `SELECT id, username, NULL AS photo_url FROM admin WHERE status = 'active'`;
-      let params = [];
-      
-      if (search) {
-        sql += ` AND username LIKE ?`;
-        params.push(search);
-      }
+      let sql = `SELECT username AS peerUsername, username AS peerName,
+                        NULL AS photo_url
+                   FROM admin WHERE status = 'active'`;
+      const params = [];
+      if (search) { sql += ` AND username LIKE ?`; params.push(search); }
       sql += ` ORDER BY username`;
-      
-      const [rows] = await pool.query(sql, params);
-      people = rows;
+      [people] = await pool.query(sql, params);
     }
 
     const users = [];
-
     for (const p of people) {
-      // ... (Keep your existing loop for fetching lastMessage and unread counts)
       const [last] = await pool.query(
-        `SELECT id, message, sender_type, sender_id, created_at, is_read
+        `SELECT id, message, sender_type, sender_username,
+                receiver_type, receiver_username, created_at, is_read
            FROM chat_messages
-          WHERE (sender_type = ? AND sender_id = ? AND receiver_type = ? AND receiver_id = ?)
-             OR (sender_type = ? AND sender_id = ? AND receiver_type = ? AND receiver_id = ?)
+          WHERE (sender_type = ? AND sender_username = ?
+                 AND receiver_type = ? AND receiver_username = ?)
+             OR (sender_type = ? AND sender_username = ?
+                 AND receiver_type = ? AND receiver_username = ?)
           ORDER BY id DESC LIMIT 1`,
-        [type, userId, otherType, p.id, otherType, p.id, type, userId]
+        [type, username, otherType, p.peerUsername,
+         otherType, p.peerUsername, type, username]
       );
 
       const [unreadRows] = await pool.query(
         `SELECT COUNT(*) AS unread FROM chat_messages
-          WHERE receiver_type = ? AND receiver_id = ?
-            AND sender_type  = ? AND sender_id  = ?
+          WHERE receiver_type = ? AND receiver_username = ?
+            AND sender_type   = ? AND sender_username   = ?
             AND is_read = 0`,
-        [type, userId, otherType, p.id]
+        [type, username, otherType, p.peerUsername]
       );
 
       users.push({
-        userId:      p.id,
-        username:    p.username,
-        type:        otherType,
-        photoUrl:    p.photo_url,
-        lastMessage: last[0] || null,
-        unread:      unreadRows[0].unread,
-        cacheKey:    last[0] ? new Date(last[0].created_at).getTime() : 0,
+        peerUsername: p.peerUsername,
+        peerName:     p.peerName,
+        type:         otherType,
+        photoUrl:     p.photo_url,
+        lastMessage:  last[0] || null,
+        unread:       unreadRows[0].unread,
+        cacheKey:     last[0] ? new Date(last[0].created_at).getTime() : 0,
       });
     }
 
@@ -105,68 +106,60 @@ exports.getChatUsers = async (req, res) => {
   }
 };
 
-/* =====================================================================
-   GET /api/chat/messages/:userId
-   ===================================================================== */
+/* =========================================================
+   GET /api/chat/messages/:username
+   ========================================================= */
 exports.getMessages = async (req, res) => {
   try {
-    const userId = req.user.userId;
-    const type   = req.user.type;
-
-    // inline: otherType
-    let otherType;
-    if (type === 'admin') otherType = 'trainer';
-    else                  otherType = 'admin';
-
-    const peerId = Number(req.params.userId);
-    const limit  = Math.min(Number(req.query.limit) || 50, 200);
-    const before = req.query.before ? Number(req.query.before) : null;
+    const { username, type } = req.user;
+    const otherType    = type === 'admin' ? 'trainer' : 'admin';
+    const peerUsername = decodeURIComponent(req.params.username);
+    const limit        = Math.min(Number(req.query.limit) || 50, 200);
+    const before       = req.query.before ? Number(req.query.before) : null;
 
     let sql = `
-      SELECT id, sender_type, sender_id, receiver_type, receiver_id,
+      SELECT id, sender_type, sender_username,
+             receiver_type, receiver_username,
              message, is_read, created_at
         FROM chat_messages
        WHERE (
-              (sender_type = ? AND sender_id = ? AND receiver_type = ? AND receiver_id = ?)
-           OR (sender_type = ? AND sender_id = ? AND receiver_type = ? AND receiver_id = ?)
+              (sender_type = ? AND sender_username = ?
+               AND receiver_type = ? AND receiver_username = ?)
+           OR (sender_type = ? AND sender_username = ?
+               AND receiver_type = ? AND receiver_username = ?)
              )`;
     const params = [
-      type, userId, otherType, peerId,
-      otherType, peerId, type, userId,
+      type, username, otherType, peerUsername,
+      otherType, peerUsername, type, username,
     ];
 
-    if (before) {
-      sql += ` AND id < ?`;
-      params.push(before);
-    }
-
+    if (before) { sql += ` AND id < ?`; params.push(before); }
     sql += ` ORDER BY id DESC LIMIT ?`;
     params.push(limit);
 
     const [rows] = await pool.query(sql, params);
 
-    // mark incoming messages as read
+    // mark incoming as read
     await pool.query(
       `UPDATE chat_messages SET is_read = 1
-        WHERE receiver_type = ? AND receiver_id = ?
-          AND sender_type  = ? AND sender_id  = ?
+        WHERE receiver_type = ? AND receiver_username = ?
+          AND sender_type   = ? AND sender_username   = ?
           AND is_read = 0`,
-      [type, userId, otherType, peerId]
+      [type, username, otherType, peerUsername]
     );
 
-    // realtime notify peer
     const io = req.app.get('io');
     if (io) {
-      io.to(`${otherType}:${peerId}`).emit('message_read', {
-        byType: type,
-        byId:   userId,
-        peerId: userId,
+      io.to(`${otherType}:${peerUsername}`).emit('message_read', {
+        byType:       type,
+        byUsername:   username,
+        peerUsername: username,
       });
     }
 
     res.json({
-      success:  true,
-      peerId,
+      success: true,
+      peerUsername,
       messages: rows.reverse(),
       hasMore:  rows.length === limit,
     });
@@ -176,48 +169,45 @@ exports.getMessages = async (req, res) => {
   }
 };
 
-/* =====================================================================
-   POST /api/chat/messages   { peerId, message }
-   ===================================================================== */
+/* =========================================================
+   POST /api/chat/messages   { peerUsername, message }
+   ========================================================= */
 exports.sendMessage = async (req, res) => {
   try {
-    const userId = req.user.userId;
-    const type   = req.user.type;
+    const { username, type } = req.user;
+    const otherType    = type === 'admin' ? 'trainer' : 'admin';
+    const peerUsername = (req.body?.peerUsername || '').trim();
+    const text         = (req.body?.message || '').trim();
 
-    // inline: otherType
-    let otherType;
-    if (type === 'admin') otherType = 'trainer';
-    else                  otherType = 'admin';
-
-    const peerId = Number(req.body?.peerId);
-    const text   = (req.body?.message || '').trim();
-
-    if (!peerId || !text) {
-      return res.status(400).json({ success: false, message: 'peerId & message required' });
+    if (!peerUsername || !text) {
+      return res.status(400).json({
+        success: false,
+        message: 'peerUsername & message required',
+      });
     }
 
     const [ins] = await pool.query(
       `INSERT INTO chat_messages
-         (sender_type, sender_id, receiver_type, receiver_id, message)
+         (sender_type, sender_username, receiver_type, receiver_username, message)
        VALUES (?, ?, ?, ?, ?)`,
-      [type, userId, otherType, peerId, text]
+      [type, username, otherType, peerUsername, text]
     );
 
     const row = {
-      id:            ins.insertId,
-      sender_type:   type,
-      sender_id:     userId,
-      receiver_type: otherType,
-      receiver_id:   peerId,
-      message:       text,
-      is_read:       0,
-      created_at:    new Date().toISOString(),
+      id:                ins.insertId,
+      sender_type:       type,
+      sender_username:   username,
+      receiver_type:     otherType,
+      receiver_username: peerUsername,
+      message:           text,
+      is_read:           0,
+      created_at:        new Date().toISOString(),
     };
 
     const io = req.app.get('io');
     if (io) {
-      io.to(`${otherType}:${peerId}`).emit('receive_message', row);
-      io.to(`${type}:${userId}`).emit('receive_message', row);
+      io.to(`${otherType}:${peerUsername}`).emit('receive_message', row);
+      io.to(`${type}:${username}`).emit('receive_message', row);
     }
 
     res.json({ success: true, data: row });

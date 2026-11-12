@@ -10,24 +10,24 @@ function initSocket(httpServer) {
     path: '/socket.io',
   });
 
+  /* ── auth handshake ── */
   io.use((socket, next) => {
     try {
       const token =
         socket.handshake.auth?.token ||
         socket.handshake.query?.token;
-      
+
       if (!token) return next(new Error('Token required'));
 
       const decoded = JWTUtils.verifyToken(token);
 
       socket.user = {
-        userId:   decoded.userId || decoded.sub,
-        type:     decoded.type || 'admin',
         username: decoded.username,
+        type:     decoded.type || 'admin',
       };
 
-      if (!socket.user.userId) {
-        return next(new Error('Invalid token payload: missing userId'));
+      if (!socket.user.username) {
+        return next(new Error('Invalid token payload: missing username'));
       }
       next();
     } catch (e) {
@@ -35,48 +35,43 @@ function initSocket(httpServer) {
     }
   });
 
+  /* ── connection ── */
   io.on('connection', (socket) => {
-    const userId = socket.user.userId;
-    const type   = socket.user.type;
+    const { username, type } = socket.user;
+    const otherType = type === 'admin' ? 'trainer' : 'admin';
 
-    let otherType;
-    if (type === 'admin') otherType = 'trainer';
-    else                  otherType = 'admin';
+    socket.join(`${type}:${username}`);   // 👈 rooms keyed by username
 
-    const myRoom = `${type}:${userId}`;
-    socket.join(myRoom);
-
+    /* send_message */
     socket.on('send_message', async (payload, ack) => {
       try {
-        const peerId = Number(payload?.peerId);
-        const text   = (payload?.message || '').trim();
+        const peerUsername = (payload?.peerUsername || '').trim();
+        const text         = (payload?.message || '').trim();
 
-        if (!peerId || !text) {
+        if (!peerUsername || !text) {
           return ack?.({ ok: false, error: 'Invalid payload' });
         }
 
         const [ins] = await pool.query(
           `INSERT INTO chat_messages
-             (sender_type, sender_id, receiver_type, receiver_id, message)
+             (sender_type, sender_username, receiver_type, receiver_username, message)
            VALUES (?, ?, ?, ?, ?)`,
-          [type, userId, otherType, peerId, text]
+          [type, username, otherType, peerUsername, text]
         );
 
         const row = {
-          id:            ins.insertId,
-          sender_type:   type,
-          sender_id:     userId,
-          receiver_type: otherType,
-          receiver_id:   peerId,
-          message:       text,
-          is_read:       0,
-          created_at:    new Date().toISOString(),
+          id:                ins.insertId,
+          sender_type:       type,
+          sender_username:   username,
+          receiver_type:     otherType,
+          receiver_username: peerUsername,
+          message:           text,
+          is_read:           0,
+          created_at:        new Date().toISOString(),
         };
 
-        const targetRoom = `${otherType}:${peerId}`;
-
         socket.emit('receive_message', row);
-        io.to(targetRoom).emit('receive_message', row);
+        io.to(`${otherType}:${peerUsername}`).emit('receive_message', row);
 
         ack?.({ ok: true, data: row });
       } catch (err) {
@@ -84,32 +79,33 @@ function initSocket(httpServer) {
       }
     });
 
-    socket.on('typing', ({ peerId, isTyping }) => {
-      if (!peerId) return;
-      io.to(`${otherType}:${peerId}`).emit('typing', {
-        fromType: type,
-        fromId:   userId,
-        peerId,
-        isTyping: !!isTyping,
+    /* typing */
+    socket.on('typing', ({ peerUsername, isTyping }) => {
+      if (!peerUsername) return;
+      io.to(`${otherType}:${peerUsername}`).emit('typing', {
+        fromType:     type,
+        fromUsername: username,
+        isTyping:     !!isTyping,
       });
     });
 
-    socket.on('message_read', async ({ peerId }, ack) => {
+    /* message_read */
+    socket.on('message_read', async ({ peerUsername }, ack) => {
       try {
-        if (!peerId) return ack?.({ ok: false, error: 'peerId required' });
+        if (!peerUsername) return ack?.({ ok: false, error: 'peerUsername required' });
 
         await pool.query(
           `UPDATE chat_messages SET is_read = 1
-            WHERE receiver_type = ? AND receiver_id = ?
-              AND sender_type  = ? AND sender_id  = ?
+            WHERE receiver_type = ? AND receiver_username = ?
+              AND sender_type   = ? AND sender_username   = ?
               AND is_read = 0`,
-          [type, userId, otherType, peerId]
+          [type, username, otherType, peerUsername]
         );
 
-        io.to(`${otherType}:${peerId}`).emit('message_read', {
-          byType: type,
-          byId:   userId,
-          peerId,
+        io.to(`${otherType}:${peerUsername}`).emit('message_read', {
+          byType:       type,
+          byUsername:   username,
+          peerUsername: username,
         });
 
         ack?.({ ok: true });
@@ -118,9 +114,7 @@ function initSocket(httpServer) {
       }
     });
 
-    socket.on('disconnect', () => {
-      // Disconnected
-    });
+    socket.on('disconnect', () => {});
   });
 
   return io;
