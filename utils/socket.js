@@ -40,7 +40,7 @@ function initSocket(httpServer) {
     const { username, type } = socket.user;
     const otherType = type === 'admin' ? 'trainer' : 'admin';
 
-    socket.join(`${type}:${username}`);   // 👈 rooms keyed by username
+    socket.join(`${type}:${username}`);   // rooms keyed by username
 
     /* send_message */
     socket.on('send_message', async (payload, ack) => {
@@ -70,7 +70,9 @@ function initSocket(httpServer) {
           created_at:        new Date().toISOString(),
         };
 
-        socket.emit('receive_message', row);
+        // ✅ FIXED: Emit to the sender's room (updates all tabs of the sender)
+        // and the receiver's room.
+        io.to(`${type}:${username}`).emit('receive_message', row);
         io.to(`${otherType}:${peerUsername}`).emit('receive_message', row);
 
         ack?.({ ok: true, data: row });
