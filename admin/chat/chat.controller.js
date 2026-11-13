@@ -150,10 +150,16 @@ exports.getMessages = async (req, res) => {
 
     const io = req.app.get('io');
     if (io) {
+      // 1. Tell the sender that their messages were read
       io.to(`${otherType}:${peerUsername}`).emit('message_read', {
         byType:       type,
         byUsername:   username,
         peerUsername: username,
+      });
+
+      // ✅ NEW: Sync unread badges across multiple admin windows
+      io.to(`${type}:${username}`).emit('messages_read_sync', {
+        peerUsername,
       });
     }
 

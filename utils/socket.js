@@ -14,7 +14,7 @@ function initSocket(httpServer) {
 
   // ✅ CONNECT TO REDIS (Only in production/Live server)
   if (process.env.NODE_ENV === 'production') {
-  const pubClient = createClient({ url: process.env.REDIS_URL || 'redis://127.0.0.1:6379' });
+    const pubClient = createClient({ url: process.env.REDIS_URL || 'redis://127.0.0.1:6379' });
     const subClient = pubClient.duplicate();
     
     Promise.all([pubClient.connect(), subClient.connect()]).then(() => {
@@ -116,6 +116,11 @@ function initSocket(httpServer) {
           byType:       type,
           byUsername:   username,
           peerUsername: username,
+        });
+
+        // ✅ NEW: Sync unread badges across multiple admin windows
+        io.to(`${type}:${username}`).emit('messages_read_sync', {
+          peerUsername,
         });
 
         ack?.({ ok: true });
