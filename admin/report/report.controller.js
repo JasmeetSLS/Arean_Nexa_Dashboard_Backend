@@ -270,9 +270,38 @@ exports.exportArenaDailyReport = async (req, res) => {
     });
 
     // ==========================================
-    // SEND RESPONSE
+    // SEND RESPONSE (UPDATED FILENAME)
     // ==========================================
-    const filename = `Arena_Daily_Report_${date}.xlsx`;
+    
+    // 1. Get Level from the participants data
+    const level = participants[0]?.level || 'L1';
+
+    // 2. Format the frontend Date (e.g., "16th Sep 2026")
+    const dateObj = new Date(date + 'T00:00:00');
+    const day = dateObj.getDate();
+    const getSuffix = (d) => {
+      if (d > 3 && d < 21) return 'th';
+      switch (d % 10) {
+        case 1: return 'st';
+        case 2: return 'nd';
+        case 3: return 'rd';
+        default: return 'th';
+      }
+    };
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const formattedDate = `${day}${getSuffix(day)} ${monthNames[dateObj.getMonth()]} ${dateObj.getFullYear()}`;
+
+    // 3. Format API Hit Time from the 'now' variable (e.g., "1.50 PM")
+    let hours = now.getHours();
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    hours = hours % 12;
+    hours = hours ? hours : 12; // the hour '0' should be '12'
+    const formattedTime = `${hours}.${minutes} ${ampm}`;
+
+    // 4. Build the final filename
+    const filename = `Main Round ${level}_Status-${formattedDate} till ${formattedTime}.xlsx`;
+
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
@@ -419,7 +448,7 @@ exports.exportArenaOverallAttendance = async (req, res) => {
     }
 
     const dateStr = today.toISOString().split('T')[0];
-    const filename = `Arena_Overall_Attendance_${dateStr}.xlsx`;
+   const filename = `Arena MasterFile_Sales Contest Attendance Status.xlsx`;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
@@ -463,7 +492,7 @@ exports.exportArenaOverallResult = async (req, res) => {
       `SELECT p.date AS main_round_date,   -- CHANGED TO USE p.date directly
               p.region AS region, 
               p.mpin, p.dealer_code, p.city AS dealer_city,
-              p.dealer_name, p.name, p.role AS eligible, 
+              p.dealer_name, p.name, p.role AS eligible,  p.level,
               r1.appeared_status AS r1_appeared,
               CASE WHEN d.round_status IN ('Completed', 'In Progress') THEN 'Appeared' ELSE 'Not Appeared' END AS appeared_status,
               IFNULL(d.marks, 0) AS main_round,
@@ -638,10 +667,15 @@ exports.exportArenaOverallResult = async (req, res) => {
       row.getCell('dealer_name').alignment = { vertical: 'middle', horizontal: 'left' };
       row.getCell('name').alignment = { vertical: 'middle', horizontal: 'left' };
     });
+ console.log("First Participant Data:", participants[0]);
+    // ✅ Get Level from the participants table
+  const level = participants[0]?.level ;
 
-    const safeProject = String(project).replace(/[^a-z0-9]+/gi, '_');
+    // ✅ Construct filename
+    const filename = `Main Round Result_Result_Arena Contest Nov'26 ${level}.xlsx`;
+
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="Arena_Overall_Result_${safeProject}.xlsx"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     
     await wb.xlsx.write(res);
     res.end();
@@ -681,7 +715,7 @@ exports.exportArenaWinnerSummary = async (req, res) => {
       `SELECT 
           p.date AS main_round_date,
           p.region, p.mpin, p.dealer_code, p.city AS dealer_city,
-          p.dealer_name, p.name, p.role AS eligible,
+          p.dealer_name, p.name, p.role AS eligible,p.level,
           r1.category_score, r1.total_r1,
           IFNULL(d.marks, 0) AS main_round,
           d.status AS cert_status,
@@ -942,9 +976,13 @@ exports.exportArenaWinnerSummary = async (req, res) => {
       row.getCell('name').alignment        = { vertical: 'middle', horizontal: 'left' };
     });
 
-    const safeProject = String(project).replace(/[^a-z0-9]+/gi, '_');
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="Winner_Summary_${safeProject}.xlsx"`);
+   const level = winnerData[0]?.level || 'L1';
+
+// ✅ Construct dynamic filename
+const filename = `Main Round Result_Arena Contest Nov'26 ${level} - Winner List.xlsx`;
+
+res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
     await wb.xlsx.write(res);
     res.end();
@@ -997,7 +1035,6 @@ exports.getArenaFilters = async (req, res) => {
   }
 };
 
-
 exports.exportTVMorning = async (req, res) => {
   try {
     const { date } = req.query;
@@ -1030,7 +1067,6 @@ exports.exportTVMorning = async (req, res) => {
 
     const roundMap = {};
     rounds.forEach(r => {
-      // ✅ FIXED: Convert score to Number (e.g. "46.00" -> 46) so math works
       (roundMap[r.mpin] ||= {})[r.round_name] = r.score !== null ? Number(r.score) : null;
     });
 
@@ -1166,12 +1202,10 @@ exports.exportTVMorning = async (req, res) => {
     const tailStart = baseLen + totalRoundCols + 1;
     const tailEnd = tailStart + tailCols.length - 1;
 
-    // Column widths
     const baseWidths = [8, 8, 14, 15, 35, 15, 12, 25, 12, 22, 10, 12, 12];
     baseWidths.forEach((w, i) => { wsStatus.getColumn(i + 1).width = w; });
     for (let i = baseLen + 1; i <= tailEnd; i++) wsStatus.getColumn(i).width = 12;
 
-    // Header row 1
     const hr1 = [...baseCols];
     roundColumnGroups.forEach(g => {
       hr1.push(g.label, ...Array(g.rounds.length - 1).fill(''));
@@ -1181,7 +1215,6 @@ exports.exportTVMorning = async (req, res) => {
     wsStatus.addRow(hr1);
     wsStatus.addRow([...Array(baseLen).fill(''), ...allRoundCols, ...Array(tailCols.length).fill('')]);
 
-    // Merge round-group headers dynamically
     let roundColStart = baseLen + 1;
     roundColumnGroups.forEach(g => {
       if (g.rounds.length > 1) {
@@ -1192,7 +1225,6 @@ exports.exportTVMorning = async (req, res) => {
     for (let c = 1; c <= baseLen; c++) wsStatus.mergeCells(1, c, 2, c);
     for (let c = tailStart; c <= tailEnd; c++) wsStatus.mergeCells(1, c, 2, c);
 
-    // Header styling
     [1, 2].forEach(rowNum => {
       wsStatus.getRow(rowNum).eachCell({ includeEmpty: true }, (cell) => {
         cell.font = { bold: true, size: 10, color: { argb: 'FF000000' } };
@@ -1202,24 +1234,21 @@ exports.exportTVMorning = async (req, res) => {
       });
     });
 
-    // Data rows
     participants.forEach(p => {
       const rm = roundMap[p.mpin] || {};
       const pRounds = projectRounds[p.project_name] || [];
 
-      // Only fill rounds that belong to this participant's project
       const scores = allRoundCols.map(rName =>
         pRounds.includes(rName) && rm[rName] !== undefined && rm[rName] !== null ? Number(rm[rName]) : ''
       );
 
-      // ✅ Calculate Total correctly (ignoring empty strings)
       const total = scores.filter(v => typeof v === 'number').reduce((a, b) => a + b, 0);
       const appeared = ['Completed', 'In Progress'].includes(p.round_status);
 
       const row = wsStatus.addRow([
-        p.level, p.region, Number(p.mpin), p.dealer_code, p.dealer_name, p.city, p.channel, // ✅ Number(p.mpin)
+        p.level, p.region, Number(p.mpin), p.dealer_code, p.dealer_name, p.city, p.channel,
         p.name, p.role, p.trainer_name || '—', p.agency || '—', p.time_from, p.time_to,
-        ...scores, Number(total), 150, total / 150, // ✅ Number(total) instead of toFixed(2)
+        ...scores, Number(total), 150, total / 150,
         appeared ? 'Appeared' : 'Not Appeared',
         appeared ? (p.cert_status === 'Pass' ? 'Yes' : 'No') : ''
       ]);
@@ -1228,7 +1257,6 @@ exports.exportTVMorning = async (req, res) => {
         cell.alignment = { vertical: 'middle', horizontal: 'center' };
         cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
         if (colNum === tailStart + 2) cell.numFmt = '0%';
-        // ✅ Removed cell.numFmt = '0.00' so Total shows as 136 instead of 136.00
       });
       row.getCell(5).alignment = { vertical: 'middle', horizontal: 'left' };
       row.getCell(8).alignment = { vertical: 'middle', horizontal: 'left' };
@@ -1273,7 +1301,7 @@ exports.exportTVMorning = async (req, res) => {
       const appeared = ['Completed', 'In Progress'].includes(p.round_status);
       const row = wsAttendance.addRow({
         sno: idx + 1, region: p.region, dealer_name: p.dealer_name, dealer_code: p.dealer_code,
-        city: p.city, mpin: Number(p.mpin), name: p.name, role: p.role, level: p.level, // ✅ Number(p.mpin)
+        city: p.city, mpin: Number(p.mpin), name: p.name, role: p.role, level: p.level,
         trainer_name: p.trainer_name || '—', agency: p.agency || '—', date: new Date(p.date),
         time_from: p.time_from, time_to: p.time_to, attendance_status: appeared ? 'Appeared' : 'Not Appeared'
       });
@@ -1289,15 +1317,49 @@ exports.exportTVMorning = async (req, res) => {
     const buffer2 = await wbAttendance.xlsx.writeBuffer();
 
     // ==========================================
-    // 4. ZIP + SEND
+    // 4. ZIP + SEND (UPDATED FILENAMES)
     // ==========================================
+    const now = new Date();
+
+    // Format Date (e.g., "15th_Sep" and "26th Sep '26")
+    const getSuffix = (d) => {
+      if (d > 3 && d < 21) return 'th';
+      switch (d % 10) {
+        case 1: return 'st';
+        case 2: return 'nd';
+        case 3: return 'rd';
+        default: return 'th';
+      }
+    };
+    const dateObj = new Date(date + 'T00:00:00');
+    const day = dateObj.getDate();
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const month = monthNames[dateObj.getMonth()];
+    const yearShort = String(dateObj.getFullYear()).slice(-2);
+
+    const formattedDate1 = `${day}${getSuffix(day)}_${month}`;
+    const formattedDate2 = `${day}${getSuffix(day)} ${month} '${yearShort}`;
+
+    // Format API Hit Time (e.g., "11.20 AM")
+    let hours = now.getHours();
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    hours = hours % 12;
+    hours = hours ? hours : 12; 
+    const formattedHours = String(hours).padStart(2, '0');
+    const formattedTime = `${formattedHours}.${minutes} ${ampm}`;
+
+    const filename1 = `TV Main Round Status_${formattedDate1} till ${formattedTime}.xlsx`;
+    const filename2 = `Sales Contest Main Round Report - ${formattedDate2} till ${formattedTime}.xlsx`;
+    const zipFilename = `TV Reports_${formattedDate1}.zip`;
+
     const zip = new AdmZip();
-    zip.addFile(`TV_Main_Round_Status_${date}.xlsx`, Buffer.from(buffer1));
-    zip.addFile(`TV_Attendance_${date}.xlsx`, Buffer.from(buffer2));
+    zip.addFile(filename1, Buffer.from(buffer1));
+    zip.addFile(filename2, Buffer.from(buffer2));
 
     const zipBuffer = zip.toBuffer();
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="TV_Reports_${date}.zip"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${zipFilename}"`);
     res.send(zipBuffer);
 
   } catch (err) {
@@ -1517,7 +1579,7 @@ exports.exportTVOverallAttendance = async (req, res) => {
     // 3. SEND RESPONSE
     // ==========================================
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename="TV_Overall_Attendance.xlsx"');
+    res.setHeader('Content-Disposition', 'attachment; filename="TV Main Round Attendance Status.xlsx"');
     
     await wb.xlsx.write(res);
     res.end();
@@ -1801,7 +1863,7 @@ exports.exportTVOverallResult = async (req, res) => {
     });
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename="TV_Overall_Result.xlsx"');
+  res.setHeader('Content-Disposition', 'attachment; filename="TV Main Round Result Nov\'26.xlsx"');
     await wb.xlsx.write(res);
     res.end();
 
@@ -2155,8 +2217,11 @@ exports.exportTVWinners = async (req, res) => {
       });
     });
 
+   const filename = `TV Main Round Result Sep'26 -${level}_With Score.xlsx`;
+
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="TV_Winners_${level}.xlsx"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    
     await wb.xlsx.write(res);
     res.end();
 
@@ -2166,367 +2231,367 @@ exports.exportTVWinners = async (req, res) => {
   }
 };
 
-exports.exportTVWinnersZIP = async (req, res) => {
-  try {
-    const { level } = req.query;
-    if (!level) return res.status(400).json({ success: false, error: 'Level query parameter is required (e.g., ?level=L1)' });
+// exports.exportTVWinnersZIP = async (req, res) => {
+//   try {
+//     const { level } = req.query;
+//     if (!level) return res.status(400).json({ success: false, error: 'Level query parameter is required (e.g., ?level=L1)' });
 
-    const projects = ['TV_DSE&EV_L1', 'TV_TL_L1', 'TV_L2'];
+//     const projects = ['TV_DSE&EV_L1', 'TV_TL_L1', 'TV_L2'];
 
-    // 1. Fetch Project Round Configs
-    const [configs] = await pool.query(
-      `SELECT project_name, rounds FROM project_round_config WHERE project_name IN (?)`,
-      [projects]
-    );
-    const projectRounds = {};
-    configs.forEach(c => {
-      const parsed = typeof c.rounds === 'string' ? JSON.parse(c.rounds) : c.rounds;
-      projectRounds[c.project_name] = parsed.map(r => r.name);
-    });
+//     // 1. Fetch Project Round Configs
+//     const [configs] = await pool.query(
+//       `SELECT project_name, rounds FROM project_round_config WHERE project_name IN (?)`,
+//       [projects]
+//     );
+//     const projectRounds = {};
+//     configs.forEach(c => {
+//       const parsed = typeof c.rounds === 'string' ? JSON.parse(c.rounds) : c.rounds;
+//       projectRounds[c.project_name] = parsed.map(r => r.name);
+//     });
 
-    // 2. Fetch Participants
-    const [participants] = await pool.query(
-      `SELECT p.*, 
-              d.round_status, d.status AS cert_status, 
-              r1.total_r1 AS round1_score
-       FROM participants p
-       LEFT JOIN dashboard d ON d.mpin = p.mpin
-       LEFT JOIN round_1 r1 ON r1.mpin = p.mpin
-       WHERE p.project_name IN (?) AND p.level = ?
-       ORDER BY p.region, p.role, p.mpin`,
-      [projects, level]
-    );
+//     // 2. Fetch Participants
+//     const [participants] = await pool.query(
+//       `SELECT p.*, 
+//               d.round_status, d.status AS cert_status, 
+//               r1.total_r1 AS round1_score
+//        FROM participants p
+//        LEFT JOIN dashboard d ON d.mpin = p.mpin
+//        LEFT JOIN round_1 r1 ON r1.mpin = p.mpin
+//        WHERE p.project_name IN (?) AND p.level = ?
+//        ORDER BY p.region, p.role, p.mpin`,
+//       [projects, level]
+//     );
 
-    if (!participants.length) return res.status(404).json({ success: false, error: 'No data found' });
+//     if (!participants.length) return res.status(404).json({ success: false, error: 'No data found' });
 
-    // 3. Fetch Round Scores
-    const mpins = participants.map(p => p.mpin);
-    const [rounds] = await pool.query(
-      `SELECT mpin, round_name, score FROM participant_rounds WHERE mpin IN (?)`,
-      [mpins]
-    );
-    const roundMap = {};
-    rounds.forEach(r => {
-      (roundMap[r.mpin] ||= {})[r.round_name] = r.score;
-    });
+//     // 3. Fetch Round Scores
+//     const mpins = participants.map(p => p.mpin);
+//     const [rounds] = await pool.query(
+//       `SELECT mpin, round_name, score FROM participant_rounds WHERE mpin IN (?)`,
+//       [mpins]
+//     );
+//     const roundMap = {};
+//     rounds.forEach(r => {
+//       (roundMap[r.mpin] ||= {})[r.round_name] = r.score;
+//     });
 
-    // 4. Process Data & Ranking
-    const processedData = participants.map(p => {
-      const rm = roundMap[p.mpin] || {};
-      const isAppeared = ['Completed', 'In Progress'].includes(p.round_status);
+//     // 4. Process Data & Ranking
+//     const processedData = participants.map(p => {
+//       const rm = roundMap[p.mpin] || {};
+//       const isAppeared = ['Completed', 'In Progress'].includes(p.round_status);
       
-      const pRounds = projectRounds[p.project_name] || [];
-      const total = pRounds.reduce((sum, rName) => sum + (Number(rm[rName]) || 0), 0);
+//       const pRounds = projectRounds[p.project_name] || [];
+//       const total = pRounds.reduce((sum, rName) => sum + (Number(rm[rName]) || 0), 0);
       
-      let lastRoundScore = 0;
-      if (pRounds.includes('Round 3A') || pRounds.includes('Round 3B')) {
-        lastRoundScore = (Number(rm['Round 3A']) || 0) + (Number(rm['Round 3B']) || 0);
-      } else if (pRounds.length > 0) {
-        const lastRoundName = pRounds[pRounds.length - 1];
-        lastRoundScore = Number(rm[lastRoundName]) || 0;
-      }
+//       let lastRoundScore = 0;
+//       if (pRounds.includes('Round 3A') || pRounds.includes('Round 3B')) {
+//         lastRoundScore = (Number(rm['Round 3A']) || 0) + (Number(rm['Round 3B']) || 0);
+//       } else if (pRounds.length > 0) {
+//         const lastRoundName = pRounds[pRounds.length - 1];
+//         lastRoundScore = Number(rm[lastRoundName]) || 0;
+//       }
       
-      return {
-        ...p,
-        isAppeared,
-        total,
-        lastRoundScore,
-        round1_score: p.round1_score || 0,
-        dob: p.dob ? new Date(p.dob) : new Date('1900-01-01'), 
-      };
-    });
+//       return {
+//         ...p,
+//         isAppeared,
+//         total,
+//         lastRoundScore,
+//         round1_score: p.round1_score || 0,
+//         dob: p.dob ? new Date(p.dob) : new Date('1900-01-01'), 
+//       };
+//     });
 
-    // Group by Region & Role
-    const groups = {};
-    processedData.forEach(p => {
-      const key = `${p.region}|${p.role}`;
-      if (!groups[key]) groups[key] = [];
-      groups[key].push(p);
-    });
+//     // Group by Region & Role
+//     const groups = {};
+//     processedData.forEach(p => {
+//       const key = `${p.region}|${p.role}`;
+//       if (!groups[key]) groups[key] = [];
+//       groups[key].push(p);
+//     });
 
-    // Sort and Rank
-    Object.keys(groups).forEach(key => {
-      groups[key].sort((a, b) => {
-        if (a.isAppeared !== b.isAppeared) return a.isAppeared ? -1 : 1;
-        if (!a.isAppeared) return a.mpin.localeCompare(b.mpin); 
+//     // Sort and Rank
+//     Object.keys(groups).forEach(key => {
+//       groups[key].sort((a, b) => {
+//         if (a.isAppeared !== b.isAppeared) return a.isAppeared ? -1 : 1;
+//         if (!a.isAppeared) return a.mpin.localeCompare(b.mpin); 
 
-        if (b.total !== a.total) return b.total - a.total; 
-        if (b.round1_score !== a.round1_score) return b.round1_score - a.round1_score; 
-        if (b.lastRoundScore !== a.lastRoundScore) return b.lastRoundScore - a.lastRoundScore; 
-        return a.dob - b.dob; 
-      });
+//         if (b.total !== a.total) return b.total - a.total; 
+//         if (b.round1_score !== a.round1_score) return b.round1_score - a.round1_score; 
+//         if (b.lastRoundScore !== a.lastRoundScore) return b.lastRoundScore - a.lastRoundScore; 
+//         return a.dob - b.dob; 
+//       });
 
-      let rank = 1;
-      let lastRow = null;
+//       let rank = 1;
+//       let lastRow = null;
 
-      for (let i = 0; i < groups[key].length; i++) {
-        const p = groups[key][i];
+//       for (let i = 0; i < groups[key].length; i++) {
+//         const p = groups[key][i];
         
-        if (!p.isAppeared) {
-          p.winner = '';
-          p.remarks = '';
-          continue;
-        }
+//         if (!p.isAppeared) {
+//           p.winner = '';
+//           p.remarks = '';
+//           continue;
+//         }
 
-        if (lastRow && lastRow.isAppeared) {
-          if (p.total !== lastRow.total) rank++;
-          else if (p.round1_score !== lastRow.round1_score) rank++;
-          else if (p.lastRoundScore !== lastRow.lastRoundScore) rank++;
-          else if (p.dob.getTime() !== lastRow.dob.getTime()) rank++;
-        }
+//         if (lastRow && lastRow.isAppeared) {
+//           if (p.total !== lastRow.total) rank++;
+//           else if (p.round1_score !== lastRow.round1_score) rank++;
+//           else if (p.lastRoundScore !== lastRow.lastRoundScore) rank++;
+//           else if (p.dob.getTime() !== lastRow.dob.getTime()) rank++;
+//         }
         
-        if (rank <= 3) {
-          p.winner = rank === 1 ? '1st' : rank === 2 ? '2nd' : '3rd';
+//         if (rank <= 3) {
+//           p.winner = rank === 1 ? '1st' : rank === 2 ? '2nd' : '3rd';
           
-          const hasDobTie = groups[key].some(other => 
-            other.isAppeared && other.total === p.total && other.round1_score === p.round1_score && 
-            other.lastRoundScore === p.lastRoundScore && other.dob.getTime() !== p.dob.getTime()
-          );
+//           const hasDobTie = groups[key].some(other => 
+//             other.isAppeared && other.total === p.total && other.round1_score === p.round1_score && 
+//             other.lastRoundScore === p.lastRoundScore && other.dob.getTime() !== p.dob.getTime()
+//           );
 
-          if (hasDobTie) {
-            p.remarks = "Selected based on DOB tie-breaker as per rules when marks were equal.";
-          } else {
-            const hasR1Tie = groups[key].some(other => 
-              other.isAppeared && other.total === p.total && other.round1_score !== p.round1_score
-            );
-            if (hasR1Tie) {
-               p.remarks = "Selected based on Round 1 Score tie-breaker when main round marks were equal.";
-            } else {
-               const hasLastRoundTie = groups[key].some(other => 
-                  other.isAppeared && other.total === p.total && other.round1_score === p.round1_score && other.lastRoundScore !== p.lastRoundScore
-               );
-               if (hasLastRoundTie) {
-                 p.remarks = "Selected based on Last Round Score tie-breaker when main rounds and R1 were equal.";
-               } else {
-                 p.remarks = '';
-               }
-            }
-          }
-        } else {
-          p.winner = '';
-          p.remarks = '';
-        }
-        lastRow = p;
-      }
-    });
+//           if (hasDobTie) {
+//             p.remarks = "Selected based on DOB tie-breaker as per rules when marks were equal.";
+//           } else {
+//             const hasR1Tie = groups[key].some(other => 
+//               other.isAppeared && other.total === p.total && other.round1_score !== p.round1_score
+//             );
+//             if (hasR1Tie) {
+//                p.remarks = "Selected based on Round 1 Score tie-breaker when main round marks were equal.";
+//             } else {
+//                const hasLastRoundTie = groups[key].some(other => 
+//                   other.isAppeared && other.total === p.total && other.round1_score === p.round1_score && other.lastRoundScore !== p.lastRoundScore
+//                );
+//                if (hasLastRoundTie) {
+//                  p.remarks = "Selected based on Last Round Score tie-breaker when main rounds and R1 were equal.";
+//                } else {
+//                  p.remarks = '';
+//                }
+//             }
+//           }
+//         } else {
+//           p.winner = '';
+//           p.remarks = '';
+//         }
+//         lastRow = p;
+//       }
+//     });
 
-    // Flatten back to array
-    const sortedData = [];
-    Object.keys(groups).sort().forEach(key => {
-      sortedData.push(...groups[key]);
-    });
+//     // Flatten back to array
+//     const sortedData = [];
+//     Object.keys(groups).sort().forEach(key => {
+//       sortedData.push(...groups[key]);
+//     });
 
-    // ==========================================
-    // 5. BUILD EXCEL FILES
-    // ==========================================
-    const zip = new AdmZip();
+//     // ==========================================
+//     // 5. BUILD EXCEL FILES
+//     // ==========================================
+//     const zip = new AdmZip();
     
-    const uniqueRoles = [...new Set(processedData.map(p => p.role).filter(Boolean))].sort();
-    const uniqueRegions = [...new Set(processedData.map(p => p.region).filter(Boolean))].sort();
-    const numRoles = uniqueRoles.length;
+//     const uniqueRoles = [...new Set(processedData.map(p => p.role).filter(Boolean))].sort();
+//     const uniqueRegions = [...new Set(processedData.map(p => p.region).filter(Boolean))].sort();
+//     const numRoles = uniqueRoles.length;
 
-    // ==========================================
-    // FILE 1: GLOBAL SUMMARY
-    // ==========================================
-    const wbSummary = new ExcelJS.Workbook();
-    const wsSummary = wbSummary.addWorksheet('Summary');
+//     // ==========================================
+//     // FILE 1: GLOBAL SUMMARY
+//     // ==========================================
+//     const wbSummary = new ExcelJS.Workbook();
+//     const wsSummary = wbSummary.addWorksheet('Summary');
     
-    const writeSummaryHeaders = (ws) => {
-      const hr1 = [
-        'REGION', 'CONTEST LOCATION', 
-        'Mapped', ...Array(numRoles - 1).fill(''), 'Total', 
-        'Appeared', ...Array(numRoles - 1).fill(''), 'Total', 'Appeared %', 
-        'Certified', ...Array(numRoles - 1).fill(''), 'Total', 'Certified % from Appeared'
-      ];
-      const hr2 = ['', '', ...uniqueRoles, 'Total', ...uniqueRoles, 'Total', '', ...uniqueRoles, 'Total', ''];
+//     const writeSummaryHeaders = (ws) => {
+//       const hr1 = [
+//         'REGION', 'CONTEST LOCATION', 
+//         'Mapped', ...Array(numRoles - 1).fill(''), 'Total', 
+//         'Appeared', ...Array(numRoles - 1).fill(''), 'Total', 'Appeared %', 
+//         'Certified', ...Array(numRoles - 1).fill(''), 'Total', 'Certified % from Appeared'
+//       ];
+//       const hr2 = ['', '', ...uniqueRoles, 'Total', ...uniqueRoles, 'Total', '', ...uniqueRoles, 'Total', ''];
       
-      ws.addRow(hr1);
-      ws.addRow(hr2);
+//       ws.addRow(hr1);
+//       ws.addRow(hr2);
 
-      ws.mergeCells('A1:A2'); ws.mergeCells('B1:B2');
-      let cIdx = 3;
-      ws.mergeCells(1, cIdx, 1, cIdx + numRoles); cIdx += numRoles + 1; 
-      ws.mergeCells(1, cIdx, 1, cIdx + numRoles); cIdx += numRoles + 1; 
-      ws.mergeCells(1, cIdx, 2, cIdx); cIdx += 1; 
-      ws.mergeCells(1, cIdx, 1, cIdx + numRoles); cIdx += numRoles + 1; 
-      ws.mergeCells(1, cIdx, 2, cIdx); 
+//       ws.mergeCells('A1:A2'); ws.mergeCells('B1:B2');
+//       let cIdx = 3;
+//       ws.mergeCells(1, cIdx, 1, cIdx + numRoles); cIdx += numRoles + 1; 
+//       ws.mergeCells(1, cIdx, 1, cIdx + numRoles); cIdx += numRoles + 1; 
+//       ws.mergeCells(1, cIdx, 2, cIdx); cIdx += 1; 
+//       ws.mergeCells(1, cIdx, 1, cIdx + numRoles); cIdx += numRoles + 1; 
+//       ws.mergeCells(1, cIdx, 2, cIdx); 
 
-      [1, 2].forEach(r => {
-        ws.getRow(r).eachCell({ includeEmpty: true }, cell => {
-          cell.font = { bold: true, size: 10 };
-          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
-          cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-          cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
-        });
-      });
-    };
+//       [1, 2].forEach(r => {
+//         ws.getRow(r).eachCell({ includeEmpty: true }, cell => {
+//           cell.font = { bold: true, size: 10 };
+//           cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
+//           cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+//           cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+//         });
+//       });
+//     };
 
-    const writeSummaryRow = (ws, region, rows) => {
-      const mapped = uniqueRoles.map(role => rows.filter(p => p.role === role).length);
-      const app = uniqueRoles.map(role => rows.filter(p => p.role === role && p.isAppeared).length);
-      const cert = uniqueRoles.map(role => rows.filter(p => p.role === role && p.cert_status === 'Pass').length);
+//     const writeSummaryRow = (ws, region, rows) => {
+//       const mapped = uniqueRoles.map(role => rows.filter(p => p.role === role).length);
+//       const app = uniqueRoles.map(role => rows.filter(p => p.role === role && p.isAppeared).length);
+//       const cert = uniqueRoles.map(role => rows.filter(p => p.role === role && p.cert_status === 'Pass').length);
 
-      const tMap = mapped.reduce((a, b) => a + b, 0);
-      const tApp = app.reduce((a, b) => a + b, 0);
-      const tCert = cert.reduce((a, b) => a + b, 0);
+//       const tMap = mapped.reduce((a, b) => a + b, 0);
+//       const tApp = app.reduce((a, b) => a + b, 0);
+//       const tCert = cert.reduce((a, b) => a + b, 0);
 
-      const row = ws.addRow([
-        region, 'Online', ...mapped, tMap, ...app, tApp, tMap > 0 ? tApp / tMap : 0, ...cert, tCert, tApp > 0 ? tCert / tApp : 0
-      ]);
+//       const row = ws.addRow([
+//         region, 'Online', ...mapped, tMap, ...app, tApp, tMap > 0 ? tApp / tMap : 0, ...cert, tCert, tApp > 0 ? tCert / tApp : 0
+//       ]);
 
-      row.eachCell({ includeEmpty: true }, (cell, c) => {
-        cell.alignment = { vertical: 'middle', horizontal: 'center' };
-        cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
-        if (c === 3 + (numRoles + 1) * 2 || c === 3 + (numRoles + 1) * 3 + 1) cell.numFmt = '0%';
-      });
-    };
+//       row.eachCell({ includeEmpty: true }, (cell, c) => {
+//         cell.alignment = { vertical: 'middle', horizontal: 'center' };
+//         cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+//         if (c === 3 + (numRoles + 1) * 2 || c === 3 + (numRoles + 1) * 3 + 1) cell.numFmt = '0%';
+//       });
+//     };
 
-    writeSummaryHeaders(wsSummary);
+//     writeSummaryHeaders(wsSummary);
 
-    const gtMapped = Array(numRoles).fill(0), gtApp = Array(numRoles).fill(0), gtCert = Array(numRoles).fill(0);
-    let gtMappedT = 0, gtAppT = 0, gtCertT = 0;
+//     const gtMapped = Array(numRoles).fill(0), gtApp = Array(numRoles).fill(0), gtCert = Array(numRoles).fill(0);
+//     let gtMappedT = 0, gtAppT = 0, gtCertT = 0;
 
-    uniqueRegions.forEach(reg => {
-      const rRows = processedData.filter(p => p.region === reg);
-      writeSummaryRow(wsSummary, reg, rRows);
+//     uniqueRegions.forEach(reg => {
+//       const rRows = processedData.filter(p => p.region === reg);
+//       writeSummaryRow(wsSummary, reg, rRows);
 
-      const mapped = uniqueRoles.map(role => rRows.filter(p => p.role === role).length);
-      const app = uniqueRoles.map(role => rRows.filter(p => p.role === role && p.isAppeared).length);
-      const cert = uniqueRoles.map(role => rRows.filter(p => p.role === role && p.cert_status === 'Pass').length);
+//       const mapped = uniqueRoles.map(role => rRows.filter(p => p.role === role).length);
+//       const app = uniqueRoles.map(role => rRows.filter(p => p.role === role && p.isAppeared).length);
+//       const cert = uniqueRoles.map(role => rRows.filter(p => p.role === role && p.cert_status === 'Pass').length);
 
-      mapped.forEach((v, i) => gtMapped[i] += v); gtMappedT += mapped.reduce((a, b) => a + b, 0);
-      app.forEach((v, i) => gtApp[i] += v); gtAppT += app.reduce((a, b) => a + b, 0);
-      cert.forEach((v, i) => gtCert[i] += v); gtCertT += cert.reduce((a, b) => a + b, 0);
-    });
+//       mapped.forEach((v, i) => gtMapped[i] += v); gtMappedT += mapped.reduce((a, b) => a + b, 0);
+//       app.forEach((v, i) => gtApp[i] += v); gtAppT += app.reduce((a, b) => a + b, 0);
+//       cert.forEach((v, i) => gtCert[i] += v); gtCertT += cert.reduce((a, b) => a + b, 0);
+//     });
 
-    const gtRow = wsSummary.addRow([
-      'Grand Total', '', ...gtMapped, gtMappedT, ...gtApp, gtAppT, gtMappedT > 0 ? gtAppT / gtMappedT : 0, ...gtCert, gtCertT, gtAppT > 0 ? gtCertT / gtAppT : 0
-    ]);
-    gtRow.eachCell((cell, c) => {
-      cell.font = { bold: true };
-      cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
-      cell.alignment = { vertical: 'middle', horizontal: 'center' };
-      if (c === 3 + (numRoles + 1) * 2 || c === 3 + (numRoles + 1) * 3 + 1) cell.numFmt = '0%';
-    });
+//     const gtRow = wsSummary.addRow([
+//       'Grand Total', '', ...gtMapped, gtMappedT, ...gtApp, gtAppT, gtMappedT > 0 ? gtAppT / gtMappedT : 0, ...gtCert, gtCertT, gtAppT > 0 ? gtCertT / gtAppT : 0
+//     ]);
+//     gtRow.eachCell((cell, c) => {
+//       cell.font = { bold: true };
+//       cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+//       cell.alignment = { vertical: 'middle', horizontal: 'center' };
+//       if (c === 3 + (numRoles + 1) * 2 || c === 3 + (numRoles + 1) * 3 + 1) cell.numFmt = '0%';
+//     });
 
-    const summaryBuffer = await wbSummary.xlsx.writeBuffer();
-    zip.addFile(`Summary_${level}.xlsx`, Buffer.from(summaryBuffer));
+//     const summaryBuffer = await wbSummary.xlsx.writeBuffer();
+//     zip.addFile(`Summary_${level}.xlsx`, Buffer.from(summaryBuffer));
 
-    // ==========================================
-    // FILE 2+: INDIVIDUAL REGIONS (Multi-Sheet)
-    // ==========================================
-    for (const region of uniqueRegions) {
-      const regionData = sortedData.filter(p => p.region === region);
+//     // ==========================================
+//     // FILE 2+: INDIVIDUAL REGIONS (Multi-Sheet)
+//     // ==========================================
+//     for (const region of uniqueRegions) {
+//       const regionData = sortedData.filter(p => p.region === region);
 
-      const wbRegion = new ExcelJS.Workbook();
+//       const wbRegion = new ExcelJS.Workbook();
 
-      // --- SHEET 1: REGION SUMMARY ---
-      const wsRegionSummary = wbRegion.addWorksheet('Summary');
-      writeSummaryHeaders(wsRegionSummary);
-      writeSummaryRow(wsRegionSummary, region, regionData);
+//       // --- SHEET 1: REGION SUMMARY ---
+//       const wsRegionSummary = wbRegion.addWorksheet('Summary');
+//       writeSummaryHeaders(wsRegionSummary);
+//       writeSummaryRow(wsRegionSummary, region, regionData);
       
-      const mapped = uniqueRoles.map(role => regionData.filter(p => p.role === role).length);
-      const app = uniqueRoles.map(role => regionData.filter(p => p.role === role && p.isAppeared).length);
-      const cert = uniqueRoles.map(role => regionData.filter(p => p.role === role && p.cert_status === 'Pass').length);
+//       const mapped = uniqueRoles.map(role => regionData.filter(p => p.role === role).length);
+//       const app = uniqueRoles.map(role => regionData.filter(p => p.role === role && p.isAppeared).length);
+//       const cert = uniqueRoles.map(role => regionData.filter(p => p.role === role && p.cert_status === 'Pass').length);
       
-      const tMap = mapped.reduce((a, b) => a + b, 0);
-      const tApp = app.reduce((a, b) => a + b, 0);
-      const tCert = cert.reduce((a, b) => a + b, 0);
+//       const tMap = mapped.reduce((a, b) => a + b, 0);
+//       const tApp = app.reduce((a, b) => a + b, 0);
+//       const tCert = cert.reduce((a, b) => a + b, 0);
       
-      const regGtRow = wsRegionSummary.addRow([
-        'Region Total', '', ...mapped, tMap, ...app, tApp, tMap > 0 ? tApp / tMap : 0, ...cert, tCert, tApp > 0 ? tCert / tApp : 0
-      ]);
-      regGtRow.eachCell((cell, c) => {
-        cell.font = { bold: true };
-        cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
-        cell.alignment = { vertical: 'middle', horizontal: 'center' };
-        if (c === 3 + (numRoles + 1) * 2 || c === 3 + (numRoles + 1) * 3 + 1) cell.numFmt = '0%';
-      });
+//       const regGtRow = wsRegionSummary.addRow([
+//         'Region Total', '', ...mapped, tMap, ...app, tApp, tMap > 0 ? tApp / tMap : 0, ...cert, tCert, tApp > 0 ? tCert / tApp : 0
+//       ]);
+//       regGtRow.eachCell((cell, c) => {
+//         cell.font = { bold: true };
+//         cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+//         cell.alignment = { vertical: 'middle', horizontal: 'center' };
+//         if (c === 3 + (numRoles + 1) * 2 || c === 3 + (numRoles + 1) * 3 + 1) cell.numFmt = '0%';
+//       });
 
-      // --- SHEETS 2+: INDIVIDUAL ROLES ---
-      const regionRoles = [...new Set(regionData.map(p => p.role).filter(Boolean))].sort();
+//       // --- SHEETS 2+: INDIVIDUAL ROLES ---
+//       const regionRoles = [...new Set(regionData.map(p => p.role).filter(Boolean))].sort();
       
-      regionRoles.forEach(role => {
-        const roleData = regionData.filter(p => p.role === role);
-        if (roleData.length === 0) return;
+//       regionRoles.forEach(role => {
+//         const roleData = regionData.filter(p => p.role === role);
+//         if (roleData.length === 0) return;
 
-        const wsRole = wbRegion.addWorksheet(role);
+//         const wsRole = wbRegion.addWorksheet(role);
 
-        wsRole.columns = [
-          { header: 'S.NO.', key: 'sno', width: 8 },
-          { header: 'MAIN ROUND DATE', key: 'date', width: 15 },
-          { header: 'Level', key: 'level', width: 8 },
-          { header: 'REGION', key: 'region', width: 10 },
-          { header: 'MSPIN', key: 'mpin', width: 15 },
-          { header: 'DEALER_CD_FOR_CD', key: 'dealer_code', width: 18 },
-          { header: 'DEALER_NAME', key: 'dealer_name', width: 40 },
-          { header: 'CITY', key: 'city', width: 15 },
-          { header: 'Channel', key: 'channel', width: 12 },
-          { header: 'NAME', key: 'name', width: 25 },
-          { header: 'DESG', key: 'role', width: 12 },
-          { header: 'Certified', key: 'certified', width: 12 },
-          { header: 'Winners', key: 'winner', width: 10 },
-          { header: 'Remarks', key: 'remarks', width: 50 }
-        ];
+//         wsRole.columns = [
+//           { header: 'S.NO.', key: 'sno', width: 8 },
+//           { header: 'MAIN ROUND DATE', key: 'date', width: 15 },
+//           { header: 'Level', key: 'level', width: 8 },
+//           { header: 'REGION', key: 'region', width: 10 },
+//           { header: 'MSPIN', key: 'mpin', width: 15 },
+//           { header: 'DEALER_CD_FOR_CD', key: 'dealer_code', width: 18 },
+//           { header: 'DEALER_NAME', key: 'dealer_name', width: 40 },
+//           { header: 'CITY', key: 'city', width: 15 },
+//           { header: 'Channel', key: 'channel', width: 12 },
+//           { header: 'NAME', key: 'name', width: 25 },
+//           { header: 'DESG', key: 'role', width: 12 },
+//           { header: 'Certified', key: 'certified', width: 12 },
+//           { header: 'Winners', key: 'winner', width: 10 },
+//           { header: 'Remarks', key: 'remarks', width: 50 }
+//         ];
 
-        const hRow = wsRole.getRow(1);
-        hRow.height = 30;
-        hRow.eachCell((cell) => {
-          cell.font = { bold: true, size: 10, color: { argb: 'FF000000' } };
-          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
-          cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-          cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
-        });
+//         const hRow = wsRole.getRow(1);
+//         hRow.height = 30;
+//         hRow.eachCell((cell) => {
+//           cell.font = { bold: true, size: 10, color: { argb: 'FF000000' } };
+//           cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
+//           cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+//           cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+//         });
 
-        roleData.forEach((p, idx) => {
-          const row = wsRole.addRow({
-            sno: idx + 1,
-            date: new Date(p.date),
-            level: p.level,
-            region: p.region,
-            mpin: p.mpin,
-            dealer_code: p.dealer_code,
-            dealer_name: p.dealer_name,
-            city: p.city,
-            channel: p.channel,
-            name: p.name,
-            role: p.role,
-            // ✅ UPDATED: Already had this logic, just ensuring consistency
-            certified: p.isAppeared ? (p.cert_status === 'Pass' ? 'Yes' : 'No') : 'Not Appeared',
-            winner: p.winner || '',
-            remarks: p.remarks || ''
-          });
+//         roleData.forEach((p, idx) => {
+//           const row = wsRole.addRow({
+//             sno: idx + 1,
+//             date: new Date(p.date),
+//             level: p.level,
+//             region: p.region,
+//             mpin: p.mpin,
+//             dealer_code: p.dealer_code,
+//             dealer_name: p.dealer_name,
+//             city: p.city,
+//             channel: p.channel,
+//             name: p.name,
+//             role: p.role,
+//             // ✅ UPDATED: Already had this logic, just ensuring consistency
+//             certified: p.isAppeared ? (p.cert_status === 'Pass' ? 'Yes' : 'No') : 'Not Appeared',
+//             winner: p.winner || '',
+//             remarks: p.remarks || ''
+//           });
 
-          row.eachCell({ includeEmpty: true }, (cell) => {
-            cell.alignment = { vertical: 'middle', horizontal: 'center' };
-            cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
-          });
+//           row.eachCell({ includeEmpty: true }, (cell) => {
+//             cell.alignment = { vertical: 'middle', horizontal: 'center' };
+//             cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+//           });
 
-          if (row.getCell('date').value) row.getCell('date').numFmt = 'dd-mmm-yy';
+//           if (row.getCell('date').value) row.getCell('date').numFmt = 'dd-mmm-yy';
           
-          row.getCell('dealer_name').alignment = { vertical: 'middle', horizontal: 'left' };
-          row.getCell('name').alignment = { vertical: 'middle', horizontal: 'left' };
-          row.getCell('remarks').alignment = { vertical: 'middle', horizontal: 'left' };
-        });
-      });
+//           row.getCell('dealer_name').alignment = { vertical: 'middle', horizontal: 'left' };
+//           row.getCell('name').alignment = { vertical: 'middle', horizontal: 'left' };
+//           row.getCell('remarks').alignment = { vertical: 'middle', horizontal: 'left' };
+//         });
+//       });
 
-      const regionBuffer = await wbRegion.xlsx.writeBuffer();
-      zip.addFile(`Region_${region}_${level}.xlsx`, Buffer.from(regionBuffer));
-    }
+//       const regionBuffer = await wbRegion.xlsx.writeBuffer();
+//       zip.addFile(`Region_${region}_${level}.xlsx`, Buffer.from(regionBuffer));
+//     }
 
-    // ==========================================
-    // 6. SEND ZIP RESPONSE
-    // ==========================================
-    const zipBuffer = zip.toBuffer();
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="TV_Winners_${level}.zip"`);
-    res.send(zipBuffer);
+//     // ==========================================
+//     // 6. SEND ZIP RESPONSE
+//     // ==========================================
+//     const zipBuffer = zip.toBuffer();
+//     res.setHeader('Content-Type', 'application/zip');
+//     res.setHeader('Content-Disposition', `attachment; filename="TV_Winners_${level}.zip"`);
+//     res.send(zipBuffer);
 
-  } catch (err) {
-    console.error('[exportTVWinnersZIP]', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-};
+//   } catch (err) {
+//     console.error('[exportTVWinnersZIP]', err);
+//     res.status(500).json({ success: false, error: err.message });
+//   }
+// };
 
 exports.exportTVWinnersZIP = async (req, res) => {
   try {
@@ -2888,7 +2953,7 @@ exports.exportTVWinnersZIP = async (req, res) => {
     // ==========================================
     const zipBuffer = zip.toBuffer();
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="TV_Winners_${level}.zip"`);
+    res.setHeader('Content-Disposition', `attachment; filename="Region wise Result with Winners_${level}.zip"`);
     res.send(zipBuffer);
 
   } catch (err) {
@@ -2954,7 +3019,7 @@ exports.exportNexaDailyReport = async (req, res) => {
       return res.status(404).json({ success: false, error: 'No data found' });
     }
 
-    const now = new Date();
+    const now = new Date(); // 👈 API hit time captured here
 
     // Parse "9:30 AM" into a full Date on the given date
     const parseTimeToDate = (dateStr, timeStr) => {
@@ -3177,7 +3242,7 @@ exports.exportNexaDailyReport = async (req, res) => {
         agency: p.agency || '—',
         time_from: p.time_from,
         time_to: p.time_to,
-        slot_completed: p.slotCompleted ? 'Yes' : '',
+        slot_completed: p.slotCompleted ? 'Yes' : 'No', // Changed '' to 'No' based on your last request
         appeared_status: p.isAppeared ? 'Appeared' : 'Not Appeared',
         cert_status: p.certStatusStr
       });
@@ -3194,9 +3259,38 @@ exports.exportNexaDailyReport = async (req, res) => {
     });
 
     // ==========================================
-    // SEND RESPONSE
+    // SEND RESPONSE (UPDATED FILENAME)
     // ==========================================
-    const filename = `Nexa_Daily_Report_${date}.xlsx`;
+    
+    // 1. Get Level from the participants data
+    const level = participants[0]?.level || 'L1';
+
+    // 2. Format Date (e.g., "16th Sep")
+    const dateObj = new Date(date + 'T00:00:00');
+    const day = dateObj.getDate();
+    const getSuffix = (d) => {
+      if (d > 3 && d < 21) return 'th';
+      switch (d % 10) {
+        case 1: return 'st';
+        case 2: return 'nd';
+        case 3: return 'rd';
+        default: return 'th';
+      }
+    };
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const formattedDate = `${day}${getSuffix(day)} ${monthNames[dateObj.getMonth()]}`;
+
+    // 3. Format API Hit Time (e.g., "1.50 PM")
+    let hours = now.getHours();
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    hours = hours % 12;
+    hours = hours ? hours : 12; 
+    const formattedTime = `${hours}.${minutes} ${ampm}`;
+
+    // 4. Construct Filename
+    const filename = `Main Round ${level}_Status-${formattedDate} till ${formattedTime}.xlsx`;
+
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
@@ -3382,7 +3476,7 @@ exports.exportNexaOverallAttendance = async (req, res) => {
     }
 
     const dateStr = today.toISOString().split('T')[0];
-    const filename = `Nexa_Overall_Attendance_${dateStr}.xlsx`;
+    const filename = `Nexa_Overall_Attendance.xlsx`;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
@@ -3586,7 +3680,7 @@ exports.exportNexaOverallResult = async (req, res) => {
 
     const safeProject = String(project).replace(/[^a-z0-9]+/gi, '_');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="Nexa_Overall_Result_${safeProject}.xlsx"`);
+    res.setHeader('Content-Disposition', `attachment; filename="Overall_Result_${safeProject}.xlsx"`);
     
     await wb.xlsx.write(res);
     res.end();
@@ -3952,6 +4046,131 @@ exports.importMainRoundRecords = async (req, res) => {
 
   } catch (err) {
     console.error('[importMainRoundRecords]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+exports.exportTrainerSummary = async (req, res) => {
+  try {
+    const { project, date } = req.query; // ✅ Added date
+
+    if (!project) {
+      return res.status(400).json({ success: false, error: 'Project query parameter is required' });
+    }
+
+    // ✅ Build query dynamically based on whether date is selected
+    let sql = `
+      SELECT 
+          t.username AS trainer_username,
+          t.name AS trainer_name,
+          t.agency,
+          COUNT(d.mpin) AS total_assigned,
+          SUM(CASE WHEN d.round_status IN ('Completed', 'In Progress') THEN 1 ELSE 0 END) AS total_appeared,
+          SUM(CASE WHEN d.round_status = 'Completed' THEN 1 ELSE 0 END) AS total_completed,
+          SUM(CASE WHEN d.status = 'Pass' THEN 1 ELSE 0 END) AS total_certified,
+          ROUND(AVG(d.percentage), 2) AS avg_percentage,
+          ROUND(AVG(d.total_secs), 0) AS avg_secs
+       FROM dashboard d
+       JOIN trainers t ON t.username = d.trainer_id
+       JOIN participants p ON p.mpin = d.mpin  -- ✅ Join participants to filter by date
+       WHERE d.project_name = ?
+    `;
+    const params = [project];
+
+    // ✅ Add date filter if a date is passed
+    if (date) {
+      sql += ` AND p.date = ?`;
+      params.push(date);
+    }
+
+    sql += ` GROUP BY t.username, t.name, t.agency ORDER BY t.name`;
+
+    const [summaryData] = await pool.query(sql, params);
+
+    if (!summaryData.length) {
+      return res.status(404).json({ success: false, error: 'No data found for this criteria' });
+    }
+
+    const wb = new ExcelJS.Workbook();
+
+    // ==========================================
+    // SHEET 1: TRAINER SUMMARY
+    // ==========================================
+    const wsSummary = wb.addWorksheet('Trainer Summary');
+    
+    wsSummary.columns = [
+      { header: 'S.NO.', key: 'sno', width: 8 },
+      { header: 'TRAINER NAME', key: 'trainer_name', width: 25 },
+      { header: 'USERNAME', key: 'trainer_username', width: 20 },
+      { header: 'AGENCY', key: 'agency', width: 25 },
+      { header: 'TOTAL ASSIGNED', key: 'total_assigned', width: 15 },
+      { header: 'APPEARED', key: 'total_appeared', width: 15 },
+      { header: 'COMPLETED', key: 'total_completed', width: 15 },
+      { header: 'CERTIFIED (PASS)', key: 'total_certified', width: 18 },
+      { header: 'PASS RATE (%)', key: 'pass_rate', width: 15 },
+      { header: 'AVG PERCENTAGE', key: 'avg_percentage', width: 18 },
+      { header: 'AVG TIME / PARTICIPANT', key: 'avg_time_str', width: 22 }
+    ];
+
+    const hRow1 = wsSummary.getRow(1);
+    hRow1.height = 30;
+    hRow1.eachCell(cell => {
+      cell.font = { bold: true, size: 10, color: { argb: 'FF000000' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
+      cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+      cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+    });
+
+    summaryData.forEach((row, idx) => {
+      const passRate = row.total_appeared > 0 ? (row.total_certified / row.total_appeared) : 0;
+      
+      const avgSecs = Number(row.avg_secs) || 0;
+      const hrs = String(Math.floor(avgSecs / 3600)).padStart(2, '0');
+      const mins = String(Math.floor((avgSecs % 3600) / 60)).padStart(2, '0');
+      const secs = String(avgSecs % 60).padStart(2, '0');
+      const avgTimeStr = `${hrs}:${mins}:${secs}`;
+
+      const r = wsSummary.addRow({
+        sno: idx + 1,
+        trainer_name: row.trainer_name,
+        trainer_username: row.trainer_username,
+        agency: row.agency || '—',
+        total_assigned: Number(row.total_assigned) || 0,
+        total_appeared: Number(row.total_appeared) || 0,
+        total_completed: Number(row.total_completed) || 0,
+        total_certified: Number(row.total_certified) || 0,
+        pass_rate: passRate,
+        avg_percentage: Number(row.avg_percentage) || 0,
+        avg_time_str: avgTimeStr 
+      });
+
+      r.eachCell({ includeEmpty: true }, cell => {
+        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+      });
+      
+      r.getCell('trainer_name').alignment = { vertical: 'middle', horizontal: 'left' };
+      r.getCell('agency').alignment = { vertical: 'middle', horizontal: 'left' };
+      r.getCell('pass_rate').numFmt = '0.00%';
+      r.getCell('avg_percentage').numFmt = '0.00"%"';
+    });
+
+    // ==========================================
+    // SEND RESPONSE
+    // ==========================================
+    const safeProject = String(project).replace(/[^a-z0-9]+/gi, '_');
+    // ✅ Add Date to filename if date exists
+    const dateStr = date ? `_${date}` : '';
+    const filename = `Trainer_Summary_${safeProject}${dateStr}.xlsx`;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    await wb.xlsx.write(res);
+    res.end();
+
+  } catch (err) {
+    console.error('[exportTrainerSummary]', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };

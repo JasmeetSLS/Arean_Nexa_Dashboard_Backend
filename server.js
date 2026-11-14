@@ -49,7 +49,10 @@ const { initSocket } = require('./utils/socket');
 
 const app = express();
 
-app.use(cors());
+app.use(cors({
+  origin: '*', // Or specific domain
+  exposedHeaders: ['Content-Disposition'],
+}));
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 

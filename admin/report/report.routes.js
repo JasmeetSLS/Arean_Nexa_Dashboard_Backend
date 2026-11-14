@@ -39,4 +39,7 @@ router.get('/download-template-main-round', reportController.downloadMainRoundTe
 // 3. Import Excel File
 router.post('/import-main-round', upload.single('file'), reportController.importMainRoundRecords);
 
+// ✅ NEW: Trainer Summary API
+router.get('/export-trainer-summary', reportController.exportTrainerSummary);
+
 module.exports = router;
