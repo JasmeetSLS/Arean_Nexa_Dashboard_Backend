@@ -127,7 +127,7 @@ exports.getGridTrainer = async (req, res) => {
 
     if (!project) return res.status(400).json({ success: false, error: 'Project is required' });
 
-    // --- DYNAMIC FILTERS ---
+    // --- 1. DYNAMIC FILTERS ---
     let filterSql = '';
     const filterParams = [];
     
@@ -139,38 +139,38 @@ exports.getGridTrainer = async (req, res) => {
     if (trainer)    { filterSql += ' AND d.trainer_id = ?'; filterParams.push(trainer); }
 
     if (searchTrainer) { filterSql += ' AND t.name LIKE ?'; filterParams.push(`%${searchTrainer}%`); }
+    
+    // ✅ Search participant is back in the main filter
     if (searchParticipant) { 
       filterSql += ` AND (p.mpin LIKE ? OR p.name LIKE ?)`;
       filterParams.push(`%${searchParticipant}%`, `%${searchParticipant}%`);
     }
 
-    // --- ADMIN PERMISSION FILTERS ---
+    // --- 2. ADMIN PERMISSION FILTERS ---
     if (perms) {
       if (!perms.projects.includes(project)) return res.json({ success: true, rounds: [], trainers: [], pagination: { total: 0, totalPages: 1 }});
       if (perms.regions.length > 0) { filterSql += ' AND p.region IN (?)'; filterParams.push(perms.regions); } else { filterSql += ' AND 1=0'; }
       if (perms.roles.length > 0) { filterSql += ' AND p.role IN (?)'; filterParams.push(perms.roles); } else { filterSql += ' AND 1=0'; }
     }
 
-    // 1. Rounds
-    const [roundRows] = await pool.query(
-      `SELECT DISTINCT pr.round_name 
-         FROM participant_rounds pr
-         JOIN dashboard d ON d.mpin = pr.mpin
-         JOIN participants p ON p.mpin = d.mpin
-         JOIN trainers t ON t.username = d.trainer_id
-        WHERE d.project_name = ?
-          ${filterSql}
-        ORDER BY pr.round_name ASC`,
-      [project, ...filterParams]
+    // --- 3. FETCH ROUNDS (From Config Table) ---
+    const [configRows] = await pool.query(
+      `SELECT rounds FROM project_round_config WHERE project_name = ? AND status = 'active' LIMIT 1`,
+      [project]
     );
-    const rounds = roundRows.map(r => r.round_name);
+    
+    let rounds = [];
+    if (configRows.length > 0 && configRows[0].rounds) {
+      const parsed = typeof configRows[0].rounds === 'string' ? JSON.parse(configRows[0].rounds) : configRows[0].rounds;
+      rounds = parsed.map(r => r.name);
+    }
 
-    // 2. Trainers
+    // --- 4. FETCH TRAINERS (Simplified Count) ---
     const [trainers] = await pool.query(
       `SELECT
           t.id, t.name, t.username,
           t.photo_url AS \`photoUrl\`,
-          COUNT(d.mpin) AS \`totalAssigned\`,
+          COUNT(d.mpin) AS \`totalAssigned\`, -- ✅ Count is back to normal
           COALESCE(SUM(d.round_status = 'Completed'), 0) AS \`completedCount\`,
           COALESCE(ROUND(SUM(d.status = 'Pass') /
               NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)  AS \`passPercentage\`,
@@ -187,7 +187,7 @@ exports.getGridTrainer = async (req, res) => {
       [project, ...filterParams, limit, offset]
     );
 
-    // 3. Total Count
+    // --- 5. TOTAL COUNT ---
     const [[{ trainerTotal }]] = await pool.query(
       `SELECT COUNT(DISTINCT t.id) AS \`trainerTotal\` 
          FROM trainers t
@@ -199,6 +199,7 @@ exports.getGridTrainer = async (req, res) => {
       [project, ...filterParams]
     );
 
+    // --- 6. SEND RESPONSE ---
     res.json({
       success: true,
       projectName: project,
