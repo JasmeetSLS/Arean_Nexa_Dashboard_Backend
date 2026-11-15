@@ -1746,11 +1746,11 @@ exports.exportTVOverallResult = async (req, res) => {
 
           if (c === appPctIdx) {
             if (cell.value === 0) cell.value = '#DIV/0!';
-            else cell.numFmt = '0.00%';
+            else cell.numFmt = '0%';
           }
           if (c === certPctIdx) {
             if (cell.value === null) cell.value = '#DIV/0!';
-            else cell.numFmt = '0.00%';
+             else cell.numFmt = '0%';
           }
         });
       });
@@ -1831,7 +1831,7 @@ exports.exportTVOverallResult = async (req, res) => {
       const overallTotal = 150; 
       
       // ✅ FIXED: Pick percentage directly from DB
-      const percentage = p.percentage !== null ? Number(p.percentage) : 0;
+      const percentage = p.percentage !== null ? Math.round(Number(p.percentage)) : 0;
 
       const appeared = ['Completed', 'In Progress'].includes(p.round_status);
       const attendance = appeared ? 'Appeared' : 'Not Appeared';
@@ -1855,7 +1855,7 @@ exports.exportTVOverallResult = async (req, res) => {
         if (colNum === 2) cell.numFmt = 'dd-mmm-yy';
         
         // ✅ FIXED: Use 0.00"%" so it shows the DB value exactly (e.g., 93.33%)
-        if (colNum === tailStart + 2) cell.numFmt = '0.00"%"'; 
+        if (colNum === tailStart + 2)  cell.numFmt = '0"%"'; 
       });
 
       row.getCell(7).alignment = { vertical: 'middle', horizontal: 'left' };
@@ -2033,19 +2033,21 @@ exports.exportTVWinners = async (req, res) => {
     const nRoles = rolesList.length;
     const allRegions = [...new Set(processedData.map(p => p.region))].sort();
 
+    // ✅ REMOVED 'CONTEST LOCATION'
     const hr1 = [
-      'REGION', 'CONTEST LOCATION',
+      'REGION', 
       'Mapped', ...Array(Math.max(nRoles - 1, 0)).fill(''), 'Total',
       'Appeared', ...Array(Math.max(nRoles - 1, 0)).fill(''), 'Total', 'Appeared %',
       'Certified', ...Array(Math.max(nRoles - 1, 0)).fill(''), 'Total', 'Certified % from Appeared'
     ];
-    const hr2 = ['', '', ...rolesList, 'Total', ...rolesList, 'Total', '', ...rolesList, 'Total', ''];
+    const hr2 = ['', ...rolesList, 'Total', ...rolesList, 'Total', '', ...rolesList, 'Total', ''];
 
     wsSummary.addRow(hr1);
     wsSummary.addRow(hr2);
 
-    wsSummary.mergeCells('A1:A2'); wsSummary.mergeCells('B1:B2');
-    let cIdx = 3;
+    // ✅ UPDATED MERGE LOGIC FOR NEW COLUMNS
+    wsSummary.mergeCells('A1:A2');
+    let cIdx = 2; // Starts at column 2 now (B)
     wsSummary.mergeCells(1, cIdx, 1, cIdx + nRoles); cIdx += nRoles + 1;
     wsSummary.mergeCells(1, cIdx, 1, cIdx + nRoles); cIdx += nRoles + 1;
     wsSummary.mergeCells(1, cIdx, 2, cIdx); cIdx += 1;
@@ -2064,8 +2066,9 @@ exports.exportTVWinners = async (req, res) => {
     const gtMapped = Array(nRoles).fill(0), gtApp = Array(nRoles).fill(0), gtCert = Array(nRoles).fill(0);
     let gtMappedT = 0, gtAppT = 0, gtCertT = 0;
 
-    const appPctCol = 3 + (nRoles + 1) * 2;
-    const certPctCol = 3 + (nRoles + 1) * 3 + 1;
+    // ✅ UPDATED INDEXES FOR NEW COLUMNS
+    const appPctCol = 2 + (nRoles + 1) * 2;
+    const certPctCol = 2 + (nRoles + 1) * 3 + 1;
 
     allRegions.forEach(reg => {
       const rRows = processedData.filter(p => p.region === reg);
@@ -2081,8 +2084,9 @@ exports.exportTVWinners = async (req, res) => {
       app.forEach((v, i) => gtApp[i] += v); gtAppT += tApp;
       cert.forEach((v, i) => gtCert[i] += v); gtCertT += tCert;
 
+      // ✅ REMOVED 'Online'
       const row = wsSummary.addRow([
-        reg, 'Online', ...mapped, tMap, ...app, tApp, tMap > 0 ? tApp / tMap : 0, ...cert, tCert, tApp > 0 ? tCert / tApp : 0
+        reg, ...mapped, tMap, ...app, tApp, tMap > 0 ? tApp / tMap : 0, ...cert, tCert, tApp > 0 ? tCert / tApp : 0
       ]);
 
       row.eachCell({ includeEmpty: true }, (cell, c) => {
@@ -2092,8 +2096,9 @@ exports.exportTVWinners = async (req, res) => {
       });
     });
 
+    // ✅ REMOVED 'Online' FROM GRAND TOTAL
     const gtRow = wsSummary.addRow([
-      'Grand Total', '', ...gtMapped, gtMappedT, ...gtApp, gtAppT, gtMappedT > 0 ? gtAppT / gtMappedT : 0, ...gtCert, gtCertT, gtAppT > 0 ? gtCertT / gtAppT : 0
+      'Grand Total', ...gtMapped, gtMappedT, ...gtApp, gtAppT, gtMappedT > 0 ? gtAppT / gtMappedT : 0, ...gtCert, gtCertT, gtAppT > 0 ? gtCertT / gtAppT : 0
     ]);
     gtRow.eachCell((cell, c) => {
       cell.font = { bold: true };
@@ -2145,7 +2150,6 @@ exports.exportTVWinners = async (req, res) => {
       dynamicColumns.push(
         { header: 'Total', key: 'total', width: 12 },
         { header: 'Overall Total', key: 'overall', width: 12 },
-        // ✅ REMOVED 'Attendance Status' column here
         { header: 'Certified', key: 'certified', width: 12 },
         { header: 'DOB', key: 'dob', width: 15 },
         { header: 'Last Round Score', key: 'last_round', width: 15 },
@@ -2176,20 +2180,19 @@ exports.exportTVWinners = async (req, res) => {
           date: new Date(p.date),
           level: p.level,
           region: p.region,
-          mpin: p.mpin,
+          mpin: Number(p.mpin), // ✅ Converted to Number
           dealer_code: p.dealer_code,
           dealer_name: p.dealer_name,
           city: p.city,
           channel: p.channel,
           name: p.name,
           role: p.role,
-          total: total.toFixed(2),
+          total: Number(total), // ✅ Converted to Number
           overall: overall,
-          // ✅ UPDATED: if not appeared, write 'Not Appeared'
           certified: p.isAppeared ? (p.cert_status === 'Pass' ? 'Yes' : 'No') : 'Not Appeared',
           dob: p.dob.getTime() === new Date('1900-01-01').getTime() ? '—' : p.dob,
           last_round: p.lastRoundScore,
-          r1: p.round1_score,
+           r1: Number(p.round1_score),
           percentage: pct,
           winner: p.winner || '',
           remarks: p.remarks || ''
@@ -2197,7 +2200,8 @@ exports.exportTVWinners = async (req, res) => {
 
         roleRounds.forEach(rName => {
           const key = rName.replace(/\s+/g, '_').toLowerCase();
-          rowData[key] = p.rm[rName] !== undefined ? p.rm[rName] : '';
+          // ✅ Converted to Number if present
+          rowData[key] = p.rm[rName] !== undefined && p.rm[rName] !== null ? Number(p.rm[rName]) : '';
         });
 
         const row = wsRole.addRow(rowData);
@@ -2209,7 +2213,9 @@ exports.exportTVWinners = async (req, res) => {
 
         if (row.getCell('date').value) row.getCell('date').numFmt = 'dd-mmm-yy';
         if (row.getCell('dob').value !== '—') row.getCell('dob').numFmt = 'dd-mmm-yy';
-        row.getCell('percentage').numFmt = '0.0%';
+        
+        // ✅ Changed to '0%' to show 98%
+        row.getCell('percentage').numFmt = '0%'; 
 
         row.getCell('dealer_name').alignment = { vertical: 'middle', horizontal: 'left' };
         row.getCell('name').alignment = { vertical: 'middle', horizontal: 'left' };
@@ -2217,7 +2223,7 @@ exports.exportTVWinners = async (req, res) => {
       });
     });
 
-   const filename = `TV Main Round Result Sep'26 -${level}_With Score.xlsx`;
+    const filename = `TV Main Round Result Sep'26 -${level}_With Score.xlsx`;
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -2752,13 +2758,7 @@ exports.exportTVWinnersZIP = async (req, res) => {
     const uniqueRegions = [...new Set(processedData.map(p => p.region).filter(Boolean))].sort();
     const numRoles = uniqueRoles.length;
 
-    // ==========================================
-    // FILE 1: GLOBAL SUMMARY
-    // ==========================================
-    const wbSummary = new ExcelJS.Workbook();
-    const wsSummary = wbSummary.addWorksheet('Summary');
-    
-    // Helper to write headers (re-used for region files)
+    // ✅ Helper functions kept at the top so Region Files can use them
     const writeSummaryHeaders = (ws) => {
       const hr1 = [
         'REGION', 'CONTEST LOCATION', 
@@ -2789,7 +2789,6 @@ exports.exportTVWinnersZIP = async (req, res) => {
       });
     };
 
-    // Helper to write a summary row
     const writeSummaryRow = (ws, region, rows) => {
       const mapped = uniqueRoles.map(role => rows.filter(p => p.role === role).length);
       const app = uniqueRoles.map(role => rows.filter(p => p.role === role && p.isAppeared).length);
@@ -2810,42 +2809,8 @@ exports.exportTVWinnersZIP = async (req, res) => {
       });
     };
 
-    writeSummaryHeaders(wsSummary);
-
-    // Calculate Grand Totals for Global Summary
-    const gtMapped = Array(numRoles).fill(0), gtApp = Array(numRoles).fill(0), gtCert = Array(numRoles).fill(0);
-    let gtMappedT = 0, gtAppT = 0, gtCertT = 0;
-
-    uniqueRegions.forEach(reg => {
-      const rRows = processedData.filter(p => p.region === reg);
-      writeSummaryRow(wsSummary, reg, rRows);
-
-      // Accumulate Grand Totals
-      const mapped = uniqueRoles.map(role => rRows.filter(p => p.role === role).length);
-      const app = uniqueRoles.map(role => rRows.filter(p => p.role === role && p.isAppeared).length);
-      const cert = uniqueRoles.map(role => rRows.filter(p => p.role === role && p.cert_status === 'Pass').length);
-
-      mapped.forEach((v, i) => gtMapped[i] += v); gtMappedT += mapped.reduce((a, b) => a + b, 0);
-      app.forEach((v, i) => gtApp[i] += v); gtAppT += app.reduce((a, b) => a + b, 0);
-      cert.forEach((v, i) => gtCert[i] += v); gtCertT += cert.reduce((a, b) => a + b, 0);
-    });
-
-    // Global Grand Total Row
-    const gtRow = wsSummary.addRow([
-      'Grand Total', '', ...gtMapped, gtMappedT, ...gtApp, gtAppT, gtMappedT > 0 ? gtAppT / gtMappedT : 0, ...gtCert, gtCertT, gtAppT > 0 ? gtCertT / gtAppT : 0
-    ]);
-    gtRow.eachCell((cell, c) => {
-      cell.font = { bold: true };
-      cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
-      cell.alignment = { vertical: 'middle', horizontal: 'center' };
-      if (c === 3 + (numRoles + 1) * 2 || c === 3 + (numRoles + 1) * 3 + 1) cell.numFmt = '0%';
-    });
-
-    const summaryBuffer = await wbSummary.xlsx.writeBuffer();
-    zip.addFile(`Summary_${level}.xlsx`, Buffer.from(summaryBuffer));
-
     // ==========================================
-    // FILE 2+: INDIVIDUAL REGIONS (Multi-Sheet)
+    // FILE 1+: INDIVIDUAL REGIONS (Multi-Sheet)
     // ==========================================
     for (const region of uniqueRegions) {
       const regionData = sortedData.filter(p => p.region === region);
@@ -2855,7 +2820,7 @@ exports.exportTVWinnersZIP = async (req, res) => {
       // --- SHEET 1: REGION SUMMARY ---
       const wsRegionSummary = wbRegion.addWorksheet('Summary');
       writeSummaryHeaders(wsRegionSummary);
-      writeSummaryRow(wsRegionSummary, region, regionData); // Just 1 row for this region
+      writeSummaryRow(wsRegionSummary, region, regionData); 
       
       // Add Grand Total for the region (acts as total for the sheet)
       const mapped = uniqueRoles.map(role => regionData.filter(p => p.role === role).length);
@@ -2885,7 +2850,6 @@ exports.exportTVWinnersZIP = async (req, res) => {
 
         const wsRole = wbRegion.addWorksheet(role);
 
-        // Exact columns requested for the role data
         wsRole.columns = [
           { header: 'S.NO.', key: 'sno', width: 8 },
           { header: 'MAIN ROUND DATE', key: 'date', width: 15 },
@@ -2918,7 +2882,7 @@ exports.exportTVWinnersZIP = async (req, res) => {
             date: new Date(p.date),
             level: p.level,
             region: p.region,
-            mpin: p.mpin,
+            mpin: Number(p.mpin), // ✅ Converted to Number
             dealer_code: p.dealer_code,
             dealer_name: p.dealer_name,
             city: p.city,
@@ -2937,7 +2901,6 @@ exports.exportTVWinnersZIP = async (req, res) => {
 
           if (row.getCell('date').value) row.getCell('date').numFmt = 'dd-mmm-yy';
           
-          // Left align long text
           row.getCell('dealer_name').alignment = { vertical: 'middle', horizontal: 'left' };
           row.getCell('name').alignment = { vertical: 'middle', horizontal: 'left' };
           row.getCell('remarks').alignment = { vertical: 'middle', horizontal: 'left' };
