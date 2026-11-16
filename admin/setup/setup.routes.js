@@ -6,6 +6,9 @@ const setupController = require('./setup.controller');
 // ---- Projects ----
 router.post('/projects', setupController.addProject);
 router.get ('/projects', setupController.getProjects);
+router.get   ('/projects/:id', setupController.getProjectById);
+router.put   ('/projects/:id', setupController.updateProject);
+router.delete('/projects/:id', setupController.deleteProject);
 
 // Excel: template + upload
 router.get ('/participants/template', setupController.downloadParticipantTemplate);

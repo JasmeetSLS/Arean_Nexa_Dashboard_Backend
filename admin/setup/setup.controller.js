@@ -708,6 +708,137 @@ exports.addProject = async (req, res) => {
   }
 };
 
+// ---- GET project by id ----
+exports.getProjectById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!Number.isInteger(Number(id)) || Number(id) <= 0)
+      return res.status(400).json({ success: false, error: 'Invalid project id' });
+
+    const [rows] = await pool.query(
+      `SELECT id,
+              project_name       AS projectName,
+              total_rounds       AS totalRounds,
+              rounds,
+              total_score        AS totalScore,
+              passing_percentage AS passingPercentage,
+              TIME_FORMAT(trainer_time, '%H:%i:%s') AS trainerTime,
+              trainer_time_secs  AS trainerTimeSecs,
+              status,
+              created_at         AS createdAt,
+              updated_at         AS updatedAt
+         FROM project_round_config
+        WHERE id = ?
+        LIMIT 1`,
+      [id]
+    );
+
+    if (rows.length === 0)
+      return res.status(404).json({ success: false, error: 'Project not found' });
+
+    const r = rows[0];
+    const project = {
+      ...r,
+      rounds: typeof r.rounds === 'string' ? JSON.parse(r.rounds) : (r.rounds || []),
+    };
+
+    res.json({ success: true, project });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// ---- UPDATE project by id ----
+exports.updateProject = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!Number.isInteger(Number(id)) || Number(id) <= 0)
+      return res.status(400).json({ success: false, error: 'Invalid project id' });
+
+    const { projectName, rounds, passingPercentage, trainerTimeSecs, status } = req.body;
+
+    if (!projectName?.trim())
+      return res.status(400).json({ success: false, error: 'projectName is required' });
+    if (!Array.isArray(rounds) || rounds.length === 0 || rounds.length > 20)
+      return res.status(400).json({ success: false, error: 'rounds must be 1–20 items' });
+    if (passingPercentage == null || passingPercentage < 0 || passingPercentage > 100)
+      return res.status(400).json({ success: false, error: 'passingPercentage must be 0–100' });
+    if (trainerTimeSecs == null || trainerTimeSecs < 0)
+      return res.status(400).json({ success: false, error: 'trainerTimeSecs must be >= 0' });
+    if (status != null && !['active', 'inactive'].includes(status))
+      return res.status(400).json({ success: false, error: "status must be 'active' or 'inactive'" });
+
+    const cleaned = rounds.map((r, i) => ({
+      name:  String(r?.name || '').trim() || `Round ${i + 1}`,
+      score: Number(r?.score) || 0,
+    }));
+
+    const totalRounds = cleaned.length;
+    const totalScore  = cleaned.reduce((a, r) => a + r.score, 0);
+
+    // Convert seconds to HH:MM:SS (same as addProject)
+    const pad = (num) => String(num).padStart(2, '0');
+    const h = Math.floor(trainerTimeSecs / 3600);
+    const m = Math.floor((trainerTimeSecs % 3600) / 60);
+    const s = trainerTimeSecs % 60;
+    const trainerTimeStr = `${pad(h)}:${pad(m)}:${pad(s)}`;
+
+    const [result] = await pool.query(
+      `UPDATE project_round_config
+          SET project_name       = ?,
+              total_rounds       = ?,
+              rounds             = ?,
+              total_score        = ?,
+              passing_percentage = ?,
+              trainer_time       = ?,
+              trainer_time_secs  = ?,
+              status             = ?
+        WHERE id = ?`,
+      [
+        projectName.trim(),
+        totalRounds,
+        JSON.stringify(cleaned),
+        totalScore,
+        passingPercentage,
+        trainerTimeStr,
+        trainerTimeSecs,
+        status || 'active',
+        id,
+      ]
+    );
+
+    if (result.affectedRows === 0)
+      return res.status(404).json({ success: false, error: 'Project not found' });
+
+    res.json({ success: true, id: Number(id) });
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY')
+      return res.status(409).json({ success: false, error: 'Project already exists' });
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// ---- DELETE project by id ----
+exports.deleteProject = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!Number.isInteger(Number(id)) || Number(id) <= 0)
+      return res.status(400).json({ success: false, error: 'Invalid project id' });
+
+    const [result] = await pool.query(
+      `DELETE FROM project_round_config WHERE id = ?`,
+      [id]
+    );
+
+    if (result.affectedRows === 0)
+      return res.status(404).json({ success: false, error: 'Project not found' });
+
+    res.json({ success: true, id: Number(id) });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 exports.downloadParticipantTemplate = async (req, res) => {
   try {
     const wb = new ExcelJS.Workbook();
@@ -720,13 +851,12 @@ exports.downloadParticipantTemplate = async (req, res) => {
       { header: 'name',         key: 'name',         width: 22 },
       { header: 'role',         key: 'role',         width: 18 },
       { header: 'region',       key: 'region',       width: 10 },
-      { header: 'zone',         key: 'zone',         width: 10 },
       { header: 'city',         key: 'city',         width: 14 },
       { header: 'dealer_name',  key: 'dealer_name',  width: 30 },
       { header: 'dealer_code',  key: 'dealer_code',  width: 14 },
       { header: 'channel',      key: 'channel',      width: 14 },
       { header: 'trainer_id',   key: 'trainer_id',   width: 15 },
-      { header: 'dob',          key: 'dob',          width: 15 }, // NEW
+      { header: 'dob',          key: 'dob',          width: 15 },
       { header: 'date',         key: 'date',         width: 15 },
       { header: 'time_from',    key: 'time_from',    width: 12 },
       { header: 'time_to',      key: 'time_to',      width: 12 },
@@ -750,13 +880,12 @@ exports.downloadParticipantTemplate = async (req, res) => {
       name: 'RAJESH THAKUR',
       role: 'Sales Expert',
       region: 'C1',
-      zone: 'C1',
       city: 'DELHI',
       dealer_name: 'AAA VEHICLEADES PVT LTD',
       dealer_code: '08B4-08',
       channel: 'Retail',
       trainer_id: 'slspooja',
-      dob: '1990-01-01', // Sample DOB
+      dob: '1990-01-01',
       date: '2026-09-18',
       time_from: '09:30 AM',
       time_to: '09:50 AM',
@@ -846,7 +975,6 @@ exports.uploadParticipants = async (req, res) => {
         name:         obj.name         ? String(obj.name).trim()         : null,
         role:         obj.role         ? String(obj.role).trim()         : null,
         region:       obj.region       ? String(obj.region).trim()       : null,
-        zone:         obj.zone         ? String(obj.zone).trim()         : null,
         city:         obj.city         ? String(obj.city).trim()         : null,
         dealer_name:  obj.dealer_name  ? String(obj.dealer_name).trim()  : null,
         dealer_code:  obj.dealer_code  ? String(obj.dealer_code).trim()  : null,
@@ -876,13 +1004,13 @@ exports.uploadParticipants = async (req, res) => {
     // 3. Process Inserts (Bulk Query)
     if (toInsert.length > 0) {
       const insertValues = toInsert.map(r => [
-        r.project_name, r.level, r.mpin, r.name, r.role, r.region, r.zone, r.city,
+        r.project_name, r.level, r.mpin, r.name, r.role, r.region, r.city,
         r.dealer_name, r.dealer_code, r.channel, r.trainer_id, r.dob, r.date, r.time_from, r.time_to
       ]);
 
       const [insRes] = await pool.query(
         `INSERT INTO participants 
-          (project_name, level, mpin, name, role, region, zone, city, 
+          (project_name, level, mpin, name, role, region, city, 
            dealer_name, dealer_code, channel, trainer_id, dob, date, time_from, time_to)
          VALUES ?`,
         [insertValues]
@@ -895,11 +1023,11 @@ exports.uploadParticipants = async (req, res) => {
       for (const r of toUpdate) {
         const [updRes] = await pool.query(
           `UPDATE participants SET
-             project_name = ?, level = ?, name = ?, role = ?, region = ?, zone = ?, city = ?,
+             project_name = ?, level = ?, name = ?, role = ?, region = ?, city = ?,
              dealer_name = ?, dealer_code = ?, channel = ?, trainer_id = ?, dob = ?, date = ?, time_from = ?, time_to = ?
            WHERE mpin = ?`,
           [
-            r.project_name, r.level, r.name, r.role, r.region, r.zone, r.city,
+            r.project_name, r.level, r.name, r.role, r.region, r.city,
             r.dealer_name, r.dealer_code, r.channel, r.trainer_id, r.dob, r.date, r.time_from, r.time_to,
             r.mpin
           ]
