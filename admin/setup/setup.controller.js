@@ -1,5 +1,6 @@
 const pool = require('../../config/db');
 const ExcelJS = require('exceljs');
+const bcrypt = require('bcrypt'); 
 // =====================================================================
 // HELPER: Fetch Admin Permissions
 // =====================================================================
@@ -1044,6 +1045,180 @@ exports.uploadParticipants = async (req, res) => {
     });
   } catch (err) {
     console.error('[uploadParticipants]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// =====================================================================
+// TRAINER TEMPLATE DOWNLOAD (no photo_url, no status)
+// =====================================================================
+exports.downloadTrainerTemplate = async (req, res) => {
+  try {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Trainers');
+
+    ws.columns = [
+      { header: 'name',          key: 'name',          width: 22 },
+      { header: 'agency',        key: 'agency',        width: 30 },
+      { header: 'base_location', key: 'base_location', width: 22 },
+      { header: 'username',      key: 'username',      width: 18 },
+      { header: 'password',      key: 'password',      width: 18 },
+    ];
+
+    ws.getRow(1).font = { bold: true };
+    ws.getRow(1).fill = {
+      type: 'pattern', pattern: 'solid',
+      fgColor: { argb: 'FFDBEAFE' },
+    };
+
+    // Sample row
+    ws.addRow({
+      name: 'Pooja Sharma',
+      agency: 'ABC Trainers Pvt Ltd',
+      base_location: 'DELHI',
+      username: 'slspooja',
+      password: 'Trainer@123',
+    });
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename=trainers_template.xlsx'
+    );
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error('[downloadTrainerTemplate]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// =====================================================================
+// TRAINER UPLOAD (status is always 'active', photo_url ignored)
+// =====================================================================
+exports.uploadTrainers = async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ success: false, error: 'Excel file required' });
+
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(req.file.buffer);
+    const ws = wb.worksheets[0];
+    if (!ws) return res.status(400).json({ success: false, error: 'No worksheet' });
+
+    const headers = [];
+    ws.getRow(1).eachCell((cell, col) => {
+      headers[col] = String(cell.value || '').trim().toLowerCase();
+    });
+
+    // ---- parse rows ----
+    const rows = [];
+    ws.eachRow((row, rowNo) => {
+      if (rowNo === 1) return;
+
+      const obj = {};
+      headers.forEach((h, col) => {
+        if (!h) return;
+        let v = row.getCell(col).value;
+        if (v && typeof v === 'object' && 'result' in v) v = v.result;
+        obj[h] = v;
+      });
+
+      const username = obj.username ? String(obj.username).trim() : '';
+      const name     = obj.name     ? String(obj.name).trim()     : '';
+
+      // Skip rows missing required fields
+      if (!username || !name) return;
+
+      rows.push({
+        name,
+        agency:        obj.agency        ? String(obj.agency).trim()        : null,
+        base_location: obj.base_location ? String(obj.base_location).trim() : null,
+        username,
+        password:      obj.password      ? String(obj.password).trim()      : null,
+      });
+    });
+
+    if (!rows.length) return res.status(400).json({ success: false, error: 'No valid data rows' });
+
+    // ---- 1. Split by existing usernames ----
+    const usernames = rows.map(r => r.username);
+    const [existing] = await pool.query(
+      `SELECT username FROM trainers WHERE username IN (?)`,
+      [usernames]
+    );
+    const existingSet = new Set(existing.map(r => r.username));
+
+    const toInsert = rows.filter(r => !existingSet.has(r.username));
+    const toUpdate = rows.filter(r =>  existingSet.has(r.username));
+
+    let insertedCount = 0;
+    let updatedCount  = 0;
+    const skipped = [];
+
+    // ---- 2. Bulk insert new trainers (status = 'active' always) ----
+    if (toInsert.length > 0) {
+      const insertValues = await Promise.all(
+        toInsert.map(async (r) => {
+          const plain  = r.password || 'Trainer@123';   // default if blank
+          const hashed = await bcrypt.hash(plain, 10);
+          return [
+            r.name, r.agency, r.base_location, r.username,
+            hashed, 'active',
+          ];
+        })
+      );
+
+      const [insRes] = await pool.query(
+        `INSERT INTO trainers
+           (name, agency, base_location, username, password, status)
+         VALUES ?`,
+        [insertValues]
+      );
+      insertedCount = insRes.affectedRows;
+    }
+
+    // ---- 3. Update existing trainers (status forced to 'active') ----
+    if (toUpdate.length > 0) {
+      for (const r of toUpdate) {
+        try {
+          if (r.password) {
+            const hashed = await bcrypt.hash(r.password, 10);
+            const [updRes] = await pool.query(
+              `UPDATE trainers SET
+                 name = ?, agency = ?, base_location = ?,
+                 password = ?, status = 'active'
+               WHERE username = ?`,
+              [r.name, r.agency, r.base_location, hashed, r.username]
+            );
+            updatedCount += updRes.affectedRows;
+          } else {
+            const [updRes] = await pool.query(
+              `UPDATE trainers SET
+                 name = ?, agency = ?, base_location = ?,
+                 status = 'active'
+               WHERE username = ?`,
+              [r.name, r.agency, r.base_location, r.username]
+            );
+            updatedCount += updRes.affectedRows;
+          }
+        } catch (e) {
+          skipped.push({ username: r.username, error: e.message });
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      inserted: insertedCount,
+      updated:  updatedCount,
+      total:    rows.length,
+      ...(skipped.length && { skipped }),
+    });
+  } catch (err) {
+    console.error('[uploadTrainers]', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };

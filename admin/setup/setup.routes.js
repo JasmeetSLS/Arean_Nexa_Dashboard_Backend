@@ -14,6 +14,9 @@ router.delete('/projects/:id', setupController.deleteProject);
 router.get ('/participants/template', setupController.downloadParticipantTemplate);
 router.post('/participants/upload',   upload.single('file'), setupController.uploadParticipants);
 
+router.get ('/trainers/template', setupController.downloadTrainerTemplate);
+router.post('/trainers/upload',   upload.single('file'), setupController.uploadTrainers);
+
 // ---- Dashboard / grids / filters ----
 router.get('/filters',          setupController.getFilters);
 router.get('/dashboard',        setupController.getDashboard);
