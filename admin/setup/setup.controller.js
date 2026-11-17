@@ -359,9 +359,6 @@ exports.getGridParticipant = async (req, res) => {
 // =====================================================================
 // GET /api/setup/dashboard
 // =====================================================================
-// =====================================================================
-// GET /api/setup/dashboard
-// =====================================================================
 exports.getDashboard = async (req, res) => {
   try {
     const { userId } = req.user || {};
@@ -370,150 +367,81 @@ exports.getDashboard = async (req, res) => {
     const regionPage  = parseInt(req.query.regionPage, 10)  || 0;
     const regionLimit = parseInt(req.query.regionLimit, 10) || 4;
     const offset      = regionPage * regionLimit;
-
+    
     const { project, date, region, dealerName, dealerCode, trainer, role } = req.query;
 
-    if (!project) {
-      return res.status(400).json({ success: false, error: 'Project is required' });
-    }
+    if (!project) return res.status(400).json({ success: false, error: 'Project is required' });
     if (perms && !perms.projects.includes(project)) {
-      return res.json({
-        success: true,
-        todayLive: {},
-        contestTotals: {},
-        regionSummary: [],
-        regionPagination: { total: 0, totalPages: 1, page: regionPage, limit: regionLimit },
-      });
+      return res.json({ success: true, todayLive: {}, contestTotals: {}, regionSummary: [], regionPagination: { total: 0, totalPages: 1 } });
     }
 
-    // ---------------------------------------------------------------
-    // DYNAMIC FILTERS (applied to `participants p`)
-    // NOTE: `trainer` filter now uses EXISTS on participant_rounds /
-    // dashboard, because we no longer require a dashboard row to exist.
-    // ---------------------------------------------------------------
+    // --- DYNAMIC FILTERS ---
     let filterSql = '';
     const filterParams = [];
+    if (date)       { filterSql += ' AND DATE(p.date) = ?'; filterParams.push(date); }
+    if (region)     { filterSql += ' AND p.region = ?'; filterParams.push(region); }
+    if (dealerName) { filterSql += ' AND p.dealer_name = ?'; filterParams.push(dealerName); }
+    if (dealerCode) { filterSql += ' AND p.dealer_code = ?'; filterParams.push(dealerCode); }
+    if (role)       { filterSql += ' AND p.role = ?'; filterParams.push(role); }
+    if (trainer)    { filterSql += ' AND d.trainer_id = ?'; filterParams.push(trainer); }
 
-    if (date)       { filterSql += ' AND DATE(p.date) = ?';       filterParams.push(date); }
-    if (region)     { filterSql += ' AND p.region = ?';           filterParams.push(region); }
-    if (dealerName) { filterSql += ' AND p.dealer_name = ?';      filterParams.push(dealerName); }
-    if (dealerCode) { filterSql += ' AND p.dealer_code = ?';      filterParams.push(dealerCode); }
-    if (role)       { filterSql += ' AND p.role = ?';             filterParams.push(role); }
-
-    if (trainer) {
-      // A participant "belongs to" a trainer if either their dashboard row
-      // or any of their round rows is tagged with that trainer.
-      filterSql += ` AND (
-        EXISTS (SELECT 1 FROM dashboard d2
-                 WHERE d2.mpin = p.mpin AND d2.trainer_id = ?)
-        OR EXISTS (SELECT 1 FROM participant_rounds pr2
-                    WHERE pr2.mpin = p.mpin AND pr2.trainer_id = ?)
-      )`;
-      filterParams.push(trainer, trainer);
-    }
-
-    // ---------------------------------------------------------------
-    // ADMIN PERMISSION FILTERS
-    // ---------------------------------------------------------------
+    // --- ADMIN PERMISSION FILTERS ---
     if (perms) {
-      if (perms.regions.length > 0) {
-        filterSql += ' AND p.region IN (?)';
-        filterParams.push(perms.regions);
-      } else {
-        filterSql += ' AND 1=0';
-      }
-      if (perms.roles.length > 0) {
-        filterSql += ' AND p.role IN (?)';
-        filterParams.push(perms.roles);
-      } else {
-        filterSql += ' AND 1=0';
-      }
+      if (perms.regions.length > 0) { filterSql += ' AND p.region IN (?)'; filterParams.push(perms.regions); } else { filterSql += ' AND 1=0'; }
+      if (perms.roles.length > 0) { filterSql += ' AND p.role IN (?)'; filterParams.push(perms.roles); } else { filterSql += ' AND 1=0'; }
     }
 
-    // ---------------------------------------------------------------
-    // Helper: build the per-participant "attempted" expression.
-    // A participant is "attempted" iff at least one participant_rounds
-    // row exists for their mpin (regardless of score/end_time).
-    // ---------------------------------------------------------------
-    const ATTEMPTED_EXPR = `EXISTS (
-      SELECT 1 FROM participant_rounds pr
-       WHERE pr.mpin = p.mpin
-    )`;
-
-    // ---------------------------------------------------------------
-    // 1) TODAY'S LIVE  (participants-anchored)
-    //
-    // Population: participants scheduled today OR who started a round today.
-    // scheduled  = COUNT(*) of that population (from participants)
-    // attempted  = subset that has ANY round row (overall, not just today)
-    // absentees  = scheduled - attempted
-    // completed / inProgress / delayed / passRate / avgTime / activeTrainers
-    //            = computed from the LEFT-JOINed dashboard row (nullable)
-    // ---------------------------------------------------------------
+    // 1) TODAY'S LIVE
     const [[todayLive]] = await pool.query(
       `SELECT
           CURDATE() AS \`date\`,
-          COUNT(*) AS \`scheduled\`,
-          COALESCE(SUM(${ATTEMPTED_EXPR}), 0) AS \`attempted\`,
-          COUNT(*) - COALESCE(SUM(${ATTEMPTED_EXPR}), 0) AS \`absentees\`,
+          COUNT(p.mpin) AS \`scheduled\`,
+          COALESCE(SUM(d.round_status IN ('Completed','In Progress')), 0) AS \`attempted\`,
           COALESCE(SUM(d.round_status = 'Completed'), 0) AS \`completed\`,
-          COALESCE(SUM(${ATTEMPTED_EXPR} AND d.round_status <> 'Completed'), 0) AS \`inProgress\`,
+          COALESCE(SUM(d.round_status = 'In Progress'), 0) AS \`inProgress\`,
+          COUNT(p.mpin) - COALESCE(SUM(d.round_status IN ('Completed','In Progress')), 0) AS \`absentees\`,
           COALESCE(SUM(d.delay_status = 'Delay'), 0) AS \`delayed\`,
-          COALESCE(ROUND(
-            SUM(d.status = 'Pass') /
-            NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2
-          ), 0) AS \`passRate\`,
+          COALESCE(ROUND(SUM(d.status = 'Pass') /
+              NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)  AS \`passRate\`,
           COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(d.total_secs)), '%H:%i:%s'), '00:00:00') AS \`avgTime\`,
           COUNT(DISTINCT d.trainer_id) AS \`activeTrainers\`
         FROM participants p
         LEFT JOIN dashboard d
-               ON d.mpin = p.mpin AND d.project_name = ?
+          ON d.mpin = p.mpin AND d.project_name = ?
        WHERE p.project_name = ?
-         AND (
-           DATE(p.date) = CURDATE()
-           OR EXISTS (
-             SELECT 1 FROM participant_rounds pr
-              WHERE pr.mpin = p.mpin AND DATE(pr.start_time) = CURDATE()
-           )
-         )
+         AND (DATE(p.date) = CURDATE() OR EXISTS (SELECT 1 FROM participant_rounds pr WHERE pr.mpin = p.mpin AND DATE(pr.start_time) = CURDATE()))
          ${filterSql}`,
       [project, project, ...filterParams]
     );
 
-    // ---------------------------------------------------------------
-    // 2) CONTEST TOTALS  (participants-anchored, all dates)
-    // ---------------------------------------------------------------
+    // 2) CONTEST TOTALS
     const [[contestTotals]] = await pool.query(
       `SELECT
-          COUNT(*) AS \`totalScheduled\`,
-          COALESCE(SUM(${ATTEMPTED_EXPR}), 0) AS \`totalAttempted\`,
-          COUNT(*) - COALESCE(SUM(${ATTEMPTED_EXPR}), 0) AS \`totalAbsentees\`,
+          COUNT(p.mpin) AS \`totalScheduled\`,
+          COALESCE(SUM(d.round_status IN ('Completed','In Progress')), 0) AS \`totalAttempted\`,
           COALESCE(SUM(d.round_status = 'Completed'), 0) AS \`completed\`,
-          COALESCE(SUM(${ATTEMPTED_EXPR} AND d.round_status <> 'Completed'), 0) AS \`inProgress\`,
+          COALESCE(SUM(d.round_status = 'In Progress'), 0) AS \`inProgress\`,
+          COUNT(p.mpin) - COALESCE(SUM(d.round_status IN ('Completed','In Progress')), 0) AS \`totalAbsentees\`,
           COALESCE(SUM(d.delay_status = 'Delay'), 0) AS \`delayed\`,
-          COALESCE(ROUND(
-            SUM(d.status = 'Pass') /
-            NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2
-          ), 0) AS \`passRate\`,
+          COALESCE(ROUND(SUM(d.status = 'Pass') /
+              NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)  AS \`passRate\`,
           COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(d.total_secs)), '%H:%i:%s'), '00:00:00') AS \`avgTime\`
         FROM participants p
         LEFT JOIN dashboard d
-               ON d.mpin = p.mpin AND d.project_name = ?
+          ON d.mpin = p.mpin AND d.project_name = ?
        WHERE p.project_name = ?
          ${filterSql}`,
       [project, project, ...filterParams]
     );
 
-    // ---------------------------------------------------------------
-    // 3) REGIONS  (participants-anchored so totals reconcile)
-    // ---------------------------------------------------------------
+    // 3) REGIONS
     const [[{ regionTotal }]] = await pool.query(
       `SELECT COUNT(*) AS \`regionTotal\`
          FROM (
            SELECT p.region
-             FROM participants p
-            WHERE p.project_name = ?
-              AND p.region IS NOT NULL
+             FROM dashboard d
+             JOIN participants p ON p.mpin = d.mpin
+            WHERE d.project_name = ?
               ${filterSql}
             GROUP BY p.region
          ) AS t`,
@@ -523,30 +451,20 @@ exports.getDashboard = async (req, res) => {
     const [regionSummary] = await pool.query(
       `SELECT
           p.region,
-          COUNT(*) AS \`scheduled\`,
-          COALESCE(SUM(${ATTEMPTED_EXPR}), 0) AS \`attempted\`,
-          COUNT(*) - COALESCE(SUM(${ATTEMPTED_EXPR}), 0) AS \`absentees\`,
           COALESCE(SUM(d.round_status = 'Completed'), 0) AS \`completed\`,
-          COALESCE(ROUND(
-            SUM(d.status = 'Pass') /
-            NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2
-          ), 0) AS \`passRate\`,
+          COALESCE(ROUND(SUM(d.status = 'Pass') /
+              NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)  AS \`passRate\`,
           COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(d.total_secs)), '%H:%i:%s'), '00:00:00') AS \`avgTime\`
-        FROM participants p
-        LEFT JOIN dashboard d
-               ON d.mpin = p.mpin AND d.project_name = ?
-       WHERE p.project_name = ?
-         AND p.region IS NOT NULL
+        FROM dashboard d
+        JOIN participants p ON p.mpin = d.mpin
+       WHERE d.project_name = ?
          ${filterSql}
        GROUP BY p.region
        ORDER BY p.region
        LIMIT ? OFFSET ?`,
-      [project, project, ...filterParams, regionLimit, offset]
+      [project, ...filterParams, regionLimit, offset]
     );
 
-    // ---------------------------------------------------------------
-    // 4) RESPONSE
-    // ---------------------------------------------------------------
     res.json({
       success: true,
       projectName: project,
