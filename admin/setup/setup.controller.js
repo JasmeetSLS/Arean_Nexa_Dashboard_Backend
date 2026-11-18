@@ -361,7 +361,6 @@ exports.getGridTrainer = async (req, res) => {
   }
 };
 
-
 exports.getGridParticipant = async (req, res) => {
   try {
     const { userId } = req.user || {};
@@ -378,7 +377,7 @@ exports.getGridParticipant = async (req, res) => {
     const offset  = page * limit;
     const pOffset = participantPage * limit;
 
-    // --- DYNAMIC FILTERS (participant side) ---
+    // --- DYNAMIC FILTERS ---
     let filterSql = '';
     const filterParams = [];
 
@@ -402,7 +401,7 @@ exports.getGridParticipant = async (req, res) => {
       if (perms.roles.length > 0)   { filterSql += ' AND p.role IN (?)';   filterParams.push(perms.roles);   } else { filterSql += ' AND 1=0'; }
     }
 
-    // --- 1. Resolve the trainer IDs for this page (same source as getGridTrainer) ---
+    // --- 1. Trainer IDs for this page (same source as getGridTrainer) ---
     const [trainerRows] = await pool.query(
       `SELECT t.id
          FROM trainers t
@@ -420,13 +419,13 @@ exports.getGridParticipant = async (req, res) => {
 
     const trainerIds = trainerRows.map(t => t.id);
 
-    // --- 2. Fetch participants filtered by t.id ---
+    // --- 2. Participants: dashboard-first (fast, attempted-only) ---
     const [participants] = await pool.query(
       `SELECT * FROM (
           SELECT
-             p.mpin,
-             p.trainer_id,
-             p.project_name AS \`projectName\`,
+             d.mpin,
+             d.trainer_id,
+             d.project_name AS \`projectName\`,
              d.marks,
              d.max_marks    AS \`totalScore\`,
              d.completed    AS \`completedRounds\`,
@@ -437,20 +436,20 @@ exports.getGridParticipant = async (req, res) => {
              d.round_status AS \`roundsStatus\`,
              d.delay_status AS \`delayStatus\`,
              p.name, p.role,
-             t.id           AS \`trainerId\`,          -- ✅ numeric t.id directly
-             ROW_NUMBER() OVER (PARTITION BY t.id ORDER BY p.mpin) AS rn
-          FROM participants p
-          JOIN trainers t     ON t.username = p.trainer_id
-          LEFT JOIN dashboard d ON d.mpin = p.mpin AND d.project_name = ?
-         WHERE p.project_name = ?
+             t.id           AS \`trainerId\`,
+             ROW_NUMBER() OVER (PARTITION BY t.id ORDER BY d.mpin) AS rn
+          FROM dashboard d
+          JOIN participants p ON p.mpin = d.mpin
+          JOIN trainers t     ON t.username = d.trainer_id
+         WHERE d.project_name = ?
            AND t.id IN (?)
            ${filterSql}
        ) AS x
        WHERE rn > ? AND rn <= ?`,
-      [project, project, trainerIds, ...filterParams, pOffset, pOffset + limit]
+      [project, trainerIds, ...filterParams, pOffset, pOffset + limit]
     );
 
-    // --- 3. Fetch rounds ---
+    // --- 3. Rounds ---
     let rounds = [];
     if (participants.length > 0) {
       const mpins = participants.map(p => p.mpin);
@@ -493,6 +492,139 @@ exports.getGridParticipant = async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 };
+
+
+// exports.getGridParticipant = async (req, res) => {
+//   try {
+//     const { userId } = req.user || {};
+//     const perms = await getAdminPermissions(userId);
+
+//     const page            = parseInt(req.query.page, 10) || 0;
+//     const participantPage = parseInt(req.query.participantPage, 10) || 0;
+//     const limit           = parseInt(req.query.limit, 10) || 5;
+
+//     const { project, date, region, dealerName, dealerCode, trainer, role, searchTrainer, searchParticipant } = req.query;
+
+//     if (!project) return res.status(400).json({ success: false, error: 'Project is required' });
+
+//     const offset  = page * limit;
+//     const pOffset = participantPage * limit;
+
+//     // --- DYNAMIC FILTERS (participant side) ---
+//     let filterSql = '';
+//     const filterParams = [];
+
+//     if (date)       { filterSql += ' AND DATE(p.date) = ?'; filterParams.push(date); }
+//     if (region)     { filterSql += ' AND p.region = ?'; filterParams.push(region); }
+//     if (dealerName) { filterSql += ' AND p.dealer_name = ?'; filterParams.push(dealerName); }
+//     if (dealerCode) { filterSql += ' AND p.dealer_code = ?'; filterParams.push(dealerCode); }
+//     if (role)       { filterSql += ' AND p.role = ?'; filterParams.push(role); }
+//     if (trainer)    { filterSql += ' AND p.trainer_id = ?'; filterParams.push(trainer); }
+
+//     if (searchTrainer)     { filterSql += ' AND t.name LIKE ?'; filterParams.push(`%${searchTrainer}%`); }
+//     if (searchParticipant) {
+//       filterSql += ` AND (p.mpin LIKE ? OR p.name LIKE ?)`;
+//       filterParams.push(`%${searchParticipant}%`, `%${searchParticipant}%`);
+//     }
+
+//     // --- ADMIN PERMISSIONS ---
+//     if (perms) {
+//       if (!perms.projects.includes(project)) return res.json({ success: true, participants: [] });
+//       if (perms.regions.length > 0) { filterSql += ' AND p.region IN (?)'; filterParams.push(perms.regions); } else { filterSql += ' AND 1=0'; }
+//       if (perms.roles.length > 0)   { filterSql += ' AND p.role IN (?)';   filterParams.push(perms.roles);   } else { filterSql += ' AND 1=0'; }
+//     }
+
+//     // --- 1. Resolve the trainer IDs for this page (same source as getGridTrainer) ---
+//     const [trainerRows] = await pool.query(
+//       `SELECT t.id
+//          FROM trainers t
+//          JOIN participants p ON p.trainer_id = t.username AND p.project_name = ?
+//         WHERE t.status = 'active'
+//           ${filterSql}
+//         GROUP BY t.id
+//         HAVING COUNT(DISTINCT p.mpin) > 0
+//         ORDER BY t.id
+//         LIMIT ? OFFSET ?`,
+//       [project, ...filterParams, limit, offset]
+//     );
+
+//     if (trainerRows.length === 0) return res.json({ success: true, participants: [] });
+
+//     const trainerIds = trainerRows.map(t => t.id);
+
+//     // --- 2. Fetch participants filtered by t.id ---
+//     const [participants] = await pool.query(
+//       `SELECT * FROM (
+//           SELECT
+//              p.mpin,
+//              p.trainer_id,
+//              p.project_name AS \`projectName\`,
+//              d.marks,
+//              d.max_marks    AS \`totalScore\`,
+//              d.completed    AS \`completedRounds\`,
+//              d.required     AS \`totalRounds\`,
+//              d.percentage,
+//              d.total_time   AS \`totalTime\`,
+//              d.status,
+//              d.round_status AS \`roundsStatus\`,
+//              d.delay_status AS \`delayStatus\`,
+//              p.name, p.role,
+//              t.id           AS \`trainerId\`,          -- ✅ numeric t.id directly
+//              ROW_NUMBER() OVER (PARTITION BY t.id ORDER BY p.mpin) AS rn
+//           FROM participants p
+//           JOIN trainers t     ON t.username = p.trainer_id
+//           LEFT JOIN dashboard d ON d.mpin = p.mpin AND d.project_name = ?
+//          WHERE p.project_name = ?
+//            AND t.id IN (?)
+//            ${filterSql}
+//        ) AS x
+//        WHERE rn > ? AND rn <= ?`,
+//       [project, project, trainerIds, ...filterParams, pOffset, pOffset + limit]
+//     );
+
+//     // --- 3. Fetch rounds ---
+//     let rounds = [];
+//     if (participants.length > 0) {
+//       const mpins = participants.map(p => p.mpin);
+//       [rounds] = await pool.query(
+//         `SELECT pr.mpin, pr.round_name AS \`roundName\`, pr.trainer_id AS \`trainerId\`,
+//                 t.name AS \`trainerName\`, pr.score
+//            FROM participant_rounds pr
+//            LEFT JOIN trainers t ON t.username = pr.trainer_id
+//           WHERE pr.mpin IN (?)
+//           ORDER BY pr.mpin, pr.id`,
+//         [mpins]
+//       );
+//     }
+
+//     const roundsByMpin = {};
+//     for (const r of rounds) {
+//       (roundsByMpin[r.mpin] ||= []).push({
+//         roundName:   r.roundName,
+//         trainerId:   r.trainerId,
+//         trainerName: r.trainerName,
+//         score:       r.score,
+//       });
+//     }
+
+//     // --- 4. Shape ---
+//     const shaped = participants.map(p => ({
+//       ...p,
+//       trainerId:       Number(p.trainerId) || null,
+//       marks:           Number(p.marks) || 0,
+//       totalScore:      Number(p.totalScore) || 100,
+//       completedRounds: Number(p.completedRounds) || 0,
+//       totalRounds:     Number(p.totalRounds) || 5,
+//       percentage:      Number(p.percentage) || 0,
+//       rounds:          roundsByMpin[p.mpin] || [],
+//     }));
+
+//     res.json({ success: true, participants: shaped });
+//   } catch (err) {
+//     console.error('[getGridParticipant]', err);
+//     res.status(500).json({ success: false, error: err.message });
+//   }
+// };
 // =====================================================================
 // GET /api/setup/dashboard
 // =====================================================================
