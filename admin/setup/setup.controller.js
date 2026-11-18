@@ -377,7 +377,6 @@ exports.getGridParticipant = async (req, res) => {
     const offset  = page * limit;
     const pOffset = participantPage * limit;
 
-    // --- DYNAMIC FILTERS ---
     let filterSql = '';
     const filterParams = [];
 
@@ -394,14 +393,13 @@ exports.getGridParticipant = async (req, res) => {
       filterParams.push(`%${searchParticipant}%`, `%${searchParticipant}%`);
     }
 
-    // --- ADMIN PERMISSIONS ---
     if (perms) {
       if (!perms.projects.includes(project)) return res.json({ success: true, participants: [] });
       if (perms.regions.length > 0) { filterSql += ' AND p.region IN (?)'; filterParams.push(perms.regions); } else { filterSql += ' AND 1=0'; }
       if (perms.roles.length > 0)   { filterSql += ' AND p.role IN (?)';   filterParams.push(perms.roles);   } else { filterSql += ' AND 1=0'; }
     }
 
-    // --- 1. Trainer IDs for this page (same source as getGridTrainer) ---
+    // --- 1. Trainer IDs for this page ---
     const [trainerRows] = await pool.query(
       `SELECT t.id
          FROM trainers t
@@ -419,37 +417,46 @@ exports.getGridParticipant = async (req, res) => {
 
     const trainerIds = trainerRows.map(t => t.id);
 
-    // --- 2. Participants: dashboard-first (fast, attempted-only) ---
-    const [participants] = await pool.query(
-      `SELECT * FROM (
-          SELECT
-             d.mpin,
-             d.trainer_id,
-             d.project_name AS \`projectName\`,
-             d.marks,
-             d.max_marks    AS \`totalScore\`,
-             d.completed    AS \`completedRounds\`,
-             d.required     AS \`totalRounds\`,
-             d.percentage,
-             d.total_time   AS \`totalTime\`,
-             d.status,
-             d.round_status AS \`roundsStatus\`,
-             d.delay_status AS \`delayStatus\`,
-             p.name, p.role,
-             t.id           AS \`trainerId\`,
-             ROW_NUMBER() OVER (PARTITION BY t.id ORDER BY d.mpin) AS rn
-          FROM dashboard d
-          JOIN participants p ON p.mpin = d.mpin
-          JOIN trainers t     ON t.username = d.trainer_id
-         WHERE d.project_name = ?
-           AND t.id IN (?)
-           ${filterSql}
-       ) AS x
-       WHERE rn > ? AND rn <= ?`,
-      [project, trainerIds, ...filterParams, pOffset, pOffset + limit]
+    // --- 2. ALL attempted participants for these trainers ---
+    const [rows] = await pool.query(
+      `SELECT
+          d.mpin,
+          p.trainer_id,  -- using p.trainer_id as source of truth
+          d.project_name AS \`projectName\`,
+          d.marks,
+          d.max_marks    AS \`totalScore\`,
+          d.completed    AS \`completedRounds\`,
+          d.required     AS \`totalRounds\`,
+          d.percentage,
+          d.total_time   AS \`totalTime\`,
+          d.status,
+          d.round_status AS \`roundsStatus\`,
+          d.delay_status AS \`delayStatus\`,
+          p.name, p.role,
+          t.id           AS \`trainerId\`
+       FROM dashboard d
+       JOIN participants p ON p.mpin = d.mpin
+       JOIN trainers t     ON t.username = p.trainer_id   -- ✅ FIXED JOIN
+      WHERE d.project_name = ?
+        AND t.id IN (?)
+        ${filterSql}
+      ORDER BY t.id, d.mpin`,
+      [project, trainerIds, ...filterParams]
     );
 
-    // --- 3. Rounds ---
+    // --- 3. Slice PER TRAINER by participantPage (Fixes empty cards bug) ---
+    const byTrainer = {};
+    for (const r of rows) {
+      (byTrainer[r.trainerId] ||= []).push(r);
+    }
+
+    const participants = [];
+    for (const tid of trainerIds) {
+      const list = byTrainer[tid] || [];
+      participants.push(...list.slice(pOffset, pOffset + limit));
+    }
+
+    // --- 4. Rounds ---
     let rounds = [];
     if (participants.length > 0) {
       const mpins = participants.map(p => p.mpin);
@@ -474,7 +481,7 @@ exports.getGridParticipant = async (req, res) => {
       });
     }
 
-    // --- 4. Shape ---
+    // --- 5. Shape ---
     const shaped = participants.map(p => ({
       ...p,
       trainerId:       Number(p.trainerId) || null,
