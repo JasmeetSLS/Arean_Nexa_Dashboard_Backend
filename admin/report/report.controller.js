@@ -4013,54 +4013,103 @@ exports.importMainRoundRecords = async (req, res) => {
   }
 };
 
+
 exports.exportTrainerSummary = async (req, res) => {
   try {
-    const { project, date } = req.query; // ✅ Added date
+    const { project, date } = req.query;
 
     if (!project) {
-      return res.status(400).json({ success: false, error: 'Project query parameter is required' });
+      return res.status(400).json({
+        success: false,
+        error: 'Project query parameter is required'
+      });
     }
 
-    // ✅ Build query dynamically based on whether date is selected
+    // ==========================================
+    // 1. FETCH TRAINER SUMMARY
+    // ==========================================
+
     let sql = `
-      SELECT 
+      SELECT
           t.username AS trainer_username,
           t.name AS trainer_name,
           t.agency,
-          COUNT(d.mpin) AS total_assigned,
-          SUM(CASE WHEN d.round_status IN ('Completed', 'In Progress') THEN 1 ELSE 0 END) AS total_appeared,
-          SUM(CASE WHEN d.round_status = 'Completed' THEN 1 ELSE 0 END) AS total_completed,
-          SUM(CASE WHEN d.status = 'Pass' THEN 1 ELSE 0 END) AS total_certified,
-          ROUND(AVG(d.percentage), 2) AS avg_percentage,
-          ROUND(AVG(d.total_secs), 0) AS avg_secs
-       FROM dashboard d
-       JOIN trainers t ON t.username = d.trainer_id
-       JOIN participants p ON p.mpin = d.mpin  -- ✅ Join participants to filter by date
-       WHERE d.project_name = ?
-    `;
-    const params = [project];
 
-    // ✅ Add date filter if a date is passed
+          -- Total Assigned from participants
+          COUNT(DISTINCT p.mpin) AS total_assigned,
+
+          -- Appeared from dashboard
+          COUNT(DISTINCT CASE
+            WHEN d.round_status IN ('Completed', 'In Progress')
+            THEN p.mpin
+          END) AS total_appeared,
+
+          -- Completed from dashboard
+          COUNT(DISTINCT CASE
+            WHEN d.round_status = 'Completed'
+            THEN p.mpin
+          END) AS total_completed,
+
+          -- Certified from dashboard
+          COUNT(DISTINCT CASE
+            WHEN d.status = 'Pass'
+            THEN p.mpin
+          END) AS total_certified,
+
+          ROUND(AVG(d.percentage), 2) AS avg_percentage,
+
+          ROUND(AVG(d.total_secs), 0) AS avg_secs
+
+      FROM participants p
+
+      JOIN trainers t
+        ON t.username = p.trainer_id
+
+      LEFT JOIN dashboard d
+        ON d.mpin = p.mpin
+       AND d.project_name = ?
+
+      WHERE p.project_name = ?
+    `;
+
+    const params = [project, project];
+
+    // Date filter
     if (date) {
       sql += ` AND p.date = ?`;
       params.push(date);
     }
 
-    sql += ` GROUP BY t.username, t.name, t.agency ORDER BY t.name`;
+    sql += `
+      GROUP BY
+        t.username,
+        t.name,
+        t.agency
+
+      ORDER BY t.name
+    `;
 
     const [summaryData] = await pool.query(sql, params);
 
     if (!summaryData.length) {
-      return res.status(404).json({ success: false, error: 'No data found for this criteria' });
+      return res.status(404).json({
+        success: false,
+        error: 'No data found for this criteria'
+      });
     }
+
+    // ==========================================
+    // 2. CREATE EXCEL WORKBOOK
+    // ==========================================
 
     const wb = new ExcelJS.Workbook();
 
     // ==========================================
     // SHEET 1: TRAINER SUMMARY
     // ==========================================
+
     const wsSummary = wb.addWorksheet('Trainer Summary');
-    
+
     wsSummary.columns = [
       { header: 'S.NO.', key: 'sno', width: 8 },
       { header: 'TRAINER NAME', key: 'trainer_name', width: 25 },
@@ -4075,65 +4124,148 @@ exports.exportTrainerSummary = async (req, res) => {
       { header: 'AVG TIME / PARTICIPANT', key: 'avg_time_str', width: 22 }
     ];
 
+    // ==========================================
+    // HEADER FORMATTING
+    // ==========================================
+
     const hRow1 = wsSummary.getRow(1);
+
     hRow1.height = 30;
+
     hRow1.eachCell(cell => {
-      cell.font = { bold: true, size: 10, color: { argb: 'FF000000' } };
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
-      cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-      cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+      cell.font = {
+        bold: true,
+        size: 10,
+        color: { argb: 'FF000000' }
+      };
+
+      cell.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFD9D9D9' }
+      };
+
+      cell.alignment = {
+        vertical: 'middle',
+        horizontal: 'center',
+        wrapText: true
+      };
+
+      cell.border = {
+        top: { style: 'thin' },
+        left: { style: 'thin' },
+        bottom: { style: 'thin' },
+        right: { style: 'thin' }
+      };
     });
 
+    // ==========================================
+    // 3. ADD TRAINER DATA
+    // ==========================================
+
     summaryData.forEach((row, idx) => {
-      const passRate = row.total_appeared > 0 ? (row.total_certified / row.total_appeared) : 0;
-      
+
+      const totalAppeared = Number(row.total_appeared) || 0;
+      const totalCertified = Number(row.total_certified) || 0;
+
+      const passRate = totalAppeared > 0
+        ? totalCertified / totalAppeared
+        : 0;
+
       const avgSecs = Number(row.avg_secs) || 0;
-      const hrs = String(Math.floor(avgSecs / 3600)).padStart(2, '0');
-      const mins = String(Math.floor((avgSecs % 3600) / 60)).padStart(2, '0');
-      const secs = String(avgSecs % 60).padStart(2, '0');
+
+      const hrs = String(
+        Math.floor(avgSecs / 3600)
+      ).padStart(2, '0');
+
+      const mins = String(
+        Math.floor((avgSecs % 3600) / 60)
+      ).padStart(2, '0');
+
+      const secs = String(
+        Math.floor(avgSecs % 60)
+      ).padStart(2, '0');
+
       const avgTimeStr = `${hrs}:${mins}:${secs}`;
 
       const r = wsSummary.addRow({
         sno: idx + 1,
+
         trainer_name: row.trainer_name,
         trainer_username: row.trainer_username,
         agency: row.agency || '—',
+
         total_assigned: Number(row.total_assigned) || 0,
-        total_appeared: Number(row.total_appeared) || 0,
+        total_appeared: totalAppeared,
         total_completed: Number(row.total_completed) || 0,
-        total_certified: Number(row.total_certified) || 0,
+        total_certified: totalCertified,
+
         pass_rate: passRate,
+
         avg_percentage: Number(row.avg_percentage) || 0,
-        avg_time_str: avgTimeStr 
+
+        avg_time_str: avgTimeStr
       });
 
+      // Row formatting
       r.eachCell({ includeEmpty: true }, cell => {
-        cell.alignment = { vertical: 'middle', horizontal: 'center' };
-        cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+        cell.alignment = {
+          vertical: 'middle',
+          horizontal: 'center'
+        };
+
+        cell.border = {
+          top: { style: 'thin' },
+          left: { style: 'thin' },
+          bottom: { style: 'thin' },
+          right: { style: 'thin' }
+        };
       });
-      
-      r.getCell('trainer_name').alignment = { vertical: 'middle', horizontal: 'left' };
-      r.getCell('agency').alignment = { vertical: 'middle', horizontal: 'left' };
+
+      r.getCell('trainer_name').alignment = {
+        vertical: 'middle',
+        horizontal: 'left'
+      };
+
+      r.getCell('agency').alignment = {
+        vertical: 'middle',
+        horizontal: 'left'
+      };
+
       r.getCell('pass_rate').numFmt = '0.00%';
+
       r.getCell('avg_percentage').numFmt = '0.00"%"';
     });
 
     // ==========================================
-    // SEND RESPONSE
+    // 4. EXPORT EXCEL FILE
     // ==========================================
+
     const safeProject = String(project).replace(/[^a-z0-9]+/gi, '_');
-    // ✅ Add Date to filename if date exists
+
     const dateStr = date ? `_${date}` : '';
+
     const filename = `Trainer_Summary_${safeProject}${dateStr}.xlsx`;
 
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${filename}"`
+    );
 
     await wb.xlsx.write(res);
     res.end();
 
   } catch (err) {
     console.error('[exportTrainerSummary]', err);
-    res.status(500).json({ success: false, error: err.message });
+
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
   }
 };

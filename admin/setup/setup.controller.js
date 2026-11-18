@@ -115,108 +115,252 @@ exports.getFilters = async (req, res) => {
 // =====================================================================
 // GET /api/setup/grid-trainer
 // =====================================================================
+
 exports.getGridTrainer = async (req, res) => {
   try {
     const { userId } = req.user || {};
     const perms = await getAdminPermissions(userId);
-    
-    const page  = parseInt(req.query.page,  10) || 0;
+
+    const page = parseInt(req.query.page, 10) || 0;
     const limit = parseInt(req.query.limit, 10) || 5;
     const offset = page * limit;
 
-    const { project, date, region, dealerName, dealerCode, trainer, role, searchTrainer, searchParticipant } = req.query;
+    const {
+      project,
+      date,
+      region,
+      dealerName,
+      dealerCode,
+      trainer,
+      role,
+      searchTrainer,
+      searchParticipant
+    } = req.query;
 
-    if (!project) return res.status(400).json({ success: false, error: 'Project is required' });
+    if (!project) {
+      return res.status(400).json({
+        success: false,
+        error: 'Project is required'
+      });
+    }
 
-    // --- 1. DYNAMIC FILTERS ---
+    // 1. DYNAMIC FILTERS
     let filterSql = '';
     const filterParams = [];
-    
-    if (date)       { filterSql += ' AND DATE(p.date) = ?'; filterParams.push(date); }
-    if (region)     { filterSql += ' AND p.region = ?'; filterParams.push(region); }
-    if (dealerName) { filterSql += ' AND p.dealer_name = ?'; filterParams.push(dealerName); }
-    if (dealerCode) { filterSql += ' AND p.dealer_code = ?'; filterParams.push(dealerCode); }
-    if (role)       { filterSql += ' AND p.role = ?'; filterParams.push(role); }
-    if (trainer)    { filterSql += ' AND d.trainer_id = ?'; filterParams.push(trainer); }
 
-    if (searchTrainer) { filterSql += ' AND t.name LIKE ?'; filterParams.push(`%${searchTrainer}%`); }
-    
-    // ✅ Search participant is back in the main filter
-    if (searchParticipant) { 
-      filterSql += ` AND (p.mpin LIKE ? OR p.name LIKE ?)`;
-      filterParams.push(`%${searchParticipant}%`, `%${searchParticipant}%`);
+    if (date) {
+      filterSql += ' AND DATE(p.date) = ?';
+      filterParams.push(date);
     }
 
-    // --- 2. ADMIN PERMISSION FILTERS ---
+    if (region) {
+      filterSql += ' AND p.region = ?';
+      filterParams.push(region);
+    }
+
+    if (dealerName) {
+      filterSql += ' AND p.dealer_name = ?';
+      filterParams.push(dealerName);
+    }
+
+    if (dealerCode) {
+      filterSql += ' AND p.dealer_code = ?';
+      filterParams.push(dealerCode);
+    }
+
+    if (role) {
+      filterSql += ' AND p.role = ?';
+      filterParams.push(role);
+    }
+
+    if (trainer) {
+      filterSql += ' AND p.trainer_id = ?';
+      filterParams.push(trainer);
+    }
+
+    if (searchTrainer) {
+      filterSql += ' AND t.name LIKE ?';
+      filterParams.push(`%${searchTrainer}%`);
+    }
+
+    if (searchParticipant) {
+      filterSql += ' AND (p.mpin LIKE ? OR p.name LIKE ?)';
+      filterParams.push(
+        `%${searchParticipant}%`,
+        `%${searchParticipant}%`
+      );
+    }
+
+    // 2. ADMIN PERMISSION FILTERS
     if (perms) {
-      if (!perms.projects.includes(project)) return res.json({ success: true, rounds: [], trainers: [], pagination: { total: 0, totalPages: 1 }});
-      if (perms.regions.length > 0) { filterSql += ' AND p.region IN (?)'; filterParams.push(perms.regions); } else { filterSql += ' AND 1=0'; }
-      if (perms.roles.length > 0) { filterSql += ' AND p.role IN (?)'; filterParams.push(perms.roles); } else { filterSql += ' AND 1=0'; }
+      if (!perms.projects.includes(project)) {
+        return res.json({
+          success: true,
+          projectName: project,
+          rounds: [],
+          trainers: [],
+          pagination: {
+            page,
+            limit,
+            total: 0,
+            totalPages: 1
+          }
+        });
+      }
+
+      if (perms.regions.length > 0) {
+        filterSql += ' AND p.region IN (?)';
+        filterParams.push(perms.regions);
+      } else {
+        filterSql += ' AND 1=0';
+      }
+
+      if (perms.roles.length > 0) {
+        filterSql += ' AND p.role IN (?)';
+        filterParams.push(perms.roles);
+      } else {
+        filterSql += ' AND 1=0';
+      }
     }
 
-    // --- 3. FETCH ROUNDS (From Config Table) ---
+    // 3. FETCH ROUNDS
     const [configRows] = await pool.query(
-      `SELECT rounds FROM project_round_config WHERE project_name = ? AND status = 'active' LIMIT 1`,
+      `SELECT rounds
+       FROM project_round_config
+       WHERE project_name = ?
+         AND status = 'active'
+       LIMIT 1`,
       [project]
     );
-    
+
     let rounds = [];
+
     if (configRows.length > 0 && configRows[0].rounds) {
-      const parsed = typeof configRows[0].rounds === 'string' ? JSON.parse(configRows[0].rounds) : configRows[0].rounds;
+      const parsed =
+        typeof configRows[0].rounds === 'string'
+          ? JSON.parse(configRows[0].rounds)
+          : configRows[0].rounds;
+
       rounds = parsed.map(r => r.name);
     }
 
-    // --- 4. FETCH TRAINERS (Simplified Count) ---
+    // 4. FETCH TRAINERS
     const [trainers] = await pool.query(
       `SELECT
-          t.id, t.name, t.username,
-          t.photo_url AS \`photoUrl\`,
-          COUNT(d.mpin) AS \`totalAssigned\`, -- ✅ Count is back to normal
-          COALESCE(SUM(d.round_status = 'Completed'), 0) AS \`completedCount\`,
-          COALESCE(ROUND(SUM(d.status = 'Pass') /
-              NULLIF(SUM(d.status = 'Pass') + SUM(d.status = 'Fail'), 0) * 100, 2), 0)  AS \`passPercentage\`,
-          COALESCE(TIME_FORMAT(SEC_TO_TIME(AVG(d.total_secs)), '%H:%i:%s'), '00:00:00') AS \`avgTime\`
-        FROM trainers t
-        LEFT JOIN dashboard d ON d.trainer_id = t.username AND d.project_name = ?
-        LEFT JOIN participants p ON p.mpin = d.mpin
+          t.id,
+          t.name,
+          t.username,
+          t.photo_url AS photoUrl,
+
+          COUNT(DISTINCT p.mpin) AS totalAssigned,
+
+          COALESCE(
+            SUM(d.round_status = 'Completed'),
+            0
+          ) AS completedCount,
+
+          COALESCE(
+            ROUND(
+              SUM(d.status = 'Pass') /
+              NULLIF(
+                SUM(d.status = 'Pass') +
+                SUM(d.status = 'Fail'),
+                0
+              ) * 100,
+              2
+            ),
+            0
+          ) AS passPercentage,
+
+          COALESCE(
+            TIME_FORMAT(
+              SEC_TO_TIME(AVG(d.total_secs)),
+              '%H:%i:%s'
+            ),
+            '00:00:00'
+          ) AS avgTime
+
+       FROM trainers t
+
+       LEFT JOIN participants p
+         ON p.trainer_id = t.username
+        AND p.project_name = ?
+
+       LEFT JOIN dashboard d
+         ON d.mpin = p.mpin
+        AND d.project_name = ?
+
        WHERE t.status = 'active'
          ${filterSql}
-       GROUP BY t.id, t.name, t.username, t.photo_url
-       HAVING COUNT(d.mpin) > 0
+
+       GROUP BY
+         t.id,
+         t.name,
+         t.username,
+         t.photo_url
+
+       HAVING COUNT(DISTINCT p.mpin) > 0
+
        ORDER BY t.id
+
        LIMIT ? OFFSET ?`,
-      [project, ...filterParams, limit, offset]
+      [project, project, ...filterParams, limit, offset]
     );
 
-    // --- 5. TOTAL COUNT ---
+    // 5. TOTAL TRAINER COUNT
     const [[{ trainerTotal }]] = await pool.query(
-      `SELECT COUNT(DISTINCT t.id) AS \`trainerTotal\` 
+      `SELECT COUNT(*) AS trainerTotal
+       FROM (
+         SELECT t.id
+
          FROM trainers t
-         LEFT JOIN dashboard d ON d.trainer_id = t.username AND d.project_name = ?
-         LEFT JOIN participants p ON p.mpin = d.mpin
-        WHERE t.status = 'active'
-          ${filterSql}
-          AND d.mpin IS NOT NULL`,
-      [project, ...filterParams]
+
+         LEFT JOIN participants p
+           ON p.trainer_id = t.username
+          AND p.project_name = ?
+
+         LEFT JOIN dashboard d
+           ON d.mpin = p.mpin
+          AND d.project_name = ?
+
+         WHERE t.status = 'active'
+           ${filterSql}
+
+         GROUP BY t.id
+
+         HAVING COUNT(DISTINCT p.mpin) > 0
+
+       ) AS trainer_list`,
+      [project, project, ...filterParams]
     );
 
-    // --- 6. SEND RESPONSE ---
+    // 6. RESPONSE
     res.json({
       success: true,
       projectName: project,
       rounds,
       trainers,
       pagination: {
-        page, limit,
+        page,
+        limit,
         total: Number(trainerTotal) || 0,
-        totalPages: Math.max(1, Math.ceil((Number(trainerTotal) || 0) / limit)),
-      },
+        totalPages: Math.max(
+          1,
+          Math.ceil((Number(trainerTotal) || 0) / limit)
+        )
+      }
     });
+
   } catch (err) {
     console.error('[getGridTrainer]', err);
-    res.status(500).json({ success: false, error: err.message });
+
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
   }
 };
+
 
 // =====================================================================
 // GET /api/setup/grid-participant
