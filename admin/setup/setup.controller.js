@@ -407,15 +407,15 @@ exports.getGridParticipant = async (req, res) => {
 
     // 1. Get trainers
     const [trainerRows] = await pool.query(
-      `SELECT t.id
-  FROM trainers t
-  JOIN participants p ON p.trainer_id = t.username AND p.project_name = ?
- WHERE t.status = 'active'
-   ${filterSql}
- GROUP BY t.id
- HAVING COUNT(DISTINCT p.mpin) > 0
- ORDER BY t.id
- LIMIT ? OFFSET ?`,
+      `SELECT DISTINCT t.id, t.username
+         FROM trainers t
+         LEFT JOIN dashboard d ON d.trainer_id = t.username AND d.project_name = ?
+         LEFT JOIN participants p ON p.mpin = d.mpin
+        WHERE t.status = 'active'
+          ${filterSql}
+          AND d.mpin IS NOT NULL
+        ORDER BY t.id
+        LIMIT ? OFFSET ?`,
       [project, ...filterParams, limit, offset]
     );
 
@@ -443,12 +443,12 @@ exports.getGridParticipant = async (req, res) => {
              d.round_status AS \`roundsStatus\`,
              d.delay_status AS \`delayStatus\`,
              p.name, p.role,
-           ROW_NUMBER() OVER (PARTITION BY t.id ORDER BY d.mpin) AS rn
+             ROW_NUMBER() OVER (PARTITION BY d.trainer_id ORDER BY d.mpin) AS rn
           FROM dashboard d
           JOIN participants p ON p.mpin = d.mpin
           JOIN trainers t ON t.username = d.trainer_id
          WHERE d.project_name = ?
-          AND t.id IN (?)           
+           AND d.trainer_id IN (?)
            ${filterSql}
        ) AS x
        WHERE rn > ? AND rn <= ?`,
