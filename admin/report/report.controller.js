@@ -32,6 +32,12 @@ exports.exportArenaDailyReport = async (req, res) => {
 
     const now = new Date();
 
+    // Date-only helper for Excel: avoids timezone shifting "2026-11-19" to "2026-11-18"
+    const toExcelDateOnly = (dateStr) => {
+      const [y, m, d] = String(dateStr).split('-').map(Number);
+      return new Date(Date.UTC(y, m - 1, d));
+    };
+
     // Parse "9:30 AM" into a full Date on the given date
     const parseTimeToDate = (dateStr, timeStr) => {
       if (!timeStr) return null;
@@ -149,7 +155,7 @@ exports.exportArenaDailyReport = async (req, res) => {
       const certPctTotal = tApp > 0 ? tCert / tApp : 0;
 
       const row = wsSummary.addRow([
-        new Date(date + 'T00:00:00'), reg,
+        toExcelDateOnly(date), reg,
         ...mapped, tMap,
         ...expected, tExp,
         ...app, tApp,
@@ -241,7 +247,7 @@ exports.exportArenaDailyReport = async (req, res) => {
     enriched.forEach((p, idx) => {
       const row = wsStatus.addRow({
         sno: idx + 1,
-        date: new Date(date + 'T00:00:00'),
+        date: toExcelDateOnly(date),
         region: p.region,
         mpin: Number(p.mpin),
         dealer_code: p.dealer_code,
@@ -270,15 +276,15 @@ exports.exportArenaDailyReport = async (req, res) => {
     });
 
     // ==========================================
-    // SEND RESPONSE (UPDATED FILENAME)
+    // SEND RESPONSE
     // ==========================================
-    
+
     // 1. Get Level from the participants data
     const level = participants[0]?.level || 'L1';
 
-    // 2. Format the frontend Date (e.g., "16th Sep 2026")
-    const dateObj = new Date(date + 'T00:00:00');
-    const day = dateObj.getDate();
+    // 2. Format the frontend Date from the YYYY-MM-DD query param
+    const [yearNum, monthNum, dayNum] = date.split('-').map(Number);
+
     const getSuffix = (d) => {
       if (d > 3 && d < 21) return 'th';
       switch (d % 10) {
@@ -288,15 +294,16 @@ exports.exportArenaDailyReport = async (req, res) => {
         default: return 'th';
       }
     };
+
     const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    const formattedDate = `${day}${getSuffix(day)} ${monthNames[dateObj.getMonth()]} ${dateObj.getFullYear()}`;
+    const formattedDate = `${dayNum}${getSuffix(dayNum)} ${monthNames[monthNum - 1]} ${yearNum}`;
 
     // 3. Format API Hit Time from the 'now' variable (e.g., "1.50 PM")
     let hours = now.getHours();
     const minutes = String(now.getMinutes()).padStart(2, '0');
     const ampm = hours >= 12 ? 'PM' : 'AM';
     hours = hours % 12;
-    hours = hours ? hours : 12; // the hour '0' should be '12'
+    hours = hours ? hours : 12;
     const formattedTime = `${hours}.${minutes} ${ampm}`;
 
     // 4. Build the final filename
@@ -317,8 +324,22 @@ exports.exportArenaOverallAttendance = async (req, res) => {
   try {
     // No query params needed - use today's date automatically
     const today = new Date();
-    today.setHours(0, 0, 0, 0); // normalize to start of day
-    
+    // UTC date-only "today" for reliable date comparisons with DATE columns
+    const todayUTC = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
+
+    // Helper: convert any DATE value (JS Date from mysql2, or 'YYYY-MM-DD' string)
+    // into a UTC-midnight Date so ExcelJS serializes the correct calendar day.
+    const toExcelDateOnly = (val) => {
+      if (!val) return null;
+      if (val instanceof Date) {
+        return new Date(Date.UTC(val.getFullYear(), val.getMonth(), val.getDate()));
+      }
+      const s = String(val).slice(0, 10);
+      const [y, m, d] = s.split('-').map(Number);
+      if (!y || !m || !d) return null;
+      return new Date(Date.UTC(y, m - 1, d));
+    };
+
     // Fetch ALL Arena data
     const [participants] = await pool.query(
       `SELECT 
@@ -345,7 +366,7 @@ exports.exportArenaOverallAttendance = async (req, res) => {
 
     const buildSheet = (sheetName, eligibleHeader, levelRows) => {
       const ws = wb.addWorksheet(sheetName);
-      
+
       ws.columns = [
         { header: 'S.NO.',            key: 'sno',           width: 8 },
         { header: 'Level',            key: 'level',         width: 8 },
@@ -364,7 +385,7 @@ exports.exportArenaOverallAttendance = async (req, res) => {
         { header: 'Time To',          key: 'time_to',       width: 12 },
         { header: 'Attendance',       key: 'attendance',    width: 18 }
       ];
-      
+
       const headerRow = ws.getRow(1);
       headerRow.height = 30;
       headerRow.eachCell(cell => {
@@ -376,22 +397,21 @@ exports.exportArenaOverallAttendance = async (req, res) => {
           bottom: { style: 'thin' }, right: { style: 'thin' }
         };
       });
-      
+
       levelRows.forEach((p, idx) => {
-        const participantDate = p.date ? new Date(p.date) : null;
-        if (participantDate) participantDate.setHours(0, 0, 0, 0);
-        
+        const participantDate = toExcelDateOnly(p.date);
+
         const appeared = ['Completed', 'In Progress'].includes(p.round_status);
-        
+
         let attendanceStatus;
         if (appeared) {
           attendanceStatus = 'Appeared';
-        } else if (participantDate && participantDate > today) {
+        } else if (participantDate && participantDate > todayUTC) {
           attendanceStatus = 'Pending';
         } else {
           attendanceStatus = 'Absent';
         }
-        
+
         const row = ws.addRow({
           sno:           idx + 1,
           level:         p.level,
@@ -410,7 +430,7 @@ exports.exportArenaOverallAttendance = async (req, res) => {
           time_to:       p.time_to,
           attendance:    attendanceStatus
         });
-        
+
         row.eachCell({ includeEmpty: true }, cell => {
           cell.alignment = { vertical: 'middle', horizontal: 'center' };
           cell.border = {
@@ -418,18 +438,18 @@ exports.exportArenaOverallAttendance = async (req, res) => {
             bottom: { style: 'thin' }, right: { style: 'thin' }
           };
         });
-        
+
         row.getCell('dealer_name').alignment   = { vertical: 'middle', horizontal: 'left' };
         row.getCell('name').alignment          = { vertical: 'middle', horizontal: 'left' };
         row.getCell('city').alignment          = { vertical: 'middle', horizontal: 'left' };
         row.getCell('faculty').alignment       = { vertical: 'middle', horizontal: 'left' };
         row.getCell('base_location').alignment = { vertical: 'middle', horizontal: 'left' };
-        
+
         if (row.getCell('date').value) {
           row.getCell('date').numFmt = 'dd-mmm-yy';
         }
       });
-      
+
       ws.views = [{ state: 'frozen', ySplit: 1 }];
       ws.autoFilter = { from: 'A1', to: `P${levelRows.length + 1}` };
     };
@@ -447,8 +467,7 @@ exports.exportArenaOverallAttendance = async (req, res) => {
       buildSheet('Arena', 'Eligible', participants);
     }
 
-    const dateStr = today.toISOString().split('T')[0];
-   const filename = `Arena MasterFile_Sales Contest Attendance Status.xlsx`;
+    const filename = `Arena MasterFile_Sales Contest Attendance Status.xlsx`;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
@@ -2982,9 +3001,15 @@ exports.exportNexaDailyReport = async (req, res) => {
       return res.status(404).json({ success: false, error: 'No data found' });
     }
 
-    const now = new Date(); // 👈 API hit time captured here
+    const now = new Date(); // API hit time (local)
 
-    // Parse "9:30 AM" into a full Date on the given date
+    // Date-only helper for Excel: avoids timezone shifting "2026-11-19" to "2026-11-18"
+    const toExcelDateOnly = (dateStr) => {
+      const [y, m, d] = String(dateStr).split('-').map(Number);
+      return new Date(Date.UTC(y, m - 1, d));
+    };
+
+    // Parse "9:30 AM" into a full local Date on the given date
     const parseTimeToDate = (dateStr, timeStr) => {
       if (!timeStr) return null;
       const match = String(timeStr).trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
@@ -3101,7 +3126,7 @@ exports.exportNexaDailyReport = async (req, res) => {
       const certPctTotal = tApp > 0 ? tCert / tApp : 0;
 
       const row = wsSummary.addRow([
-        new Date(date + 'T00:00:00'), reg,
+        toExcelDateOnly(date), reg,
         ...mapped, tMap,
         ...expected, tExp,
         ...app, tApp,
@@ -3193,7 +3218,7 @@ exports.exportNexaDailyReport = async (req, res) => {
     enriched.forEach((p, idx) => {
       const row = wsStatus.addRow({
         sno: idx + 1,
-        date: new Date(date + 'T00:00:00'),
+        date: toExcelDateOnly(date),
         region: p.region,
         mpin: Number(p.mpin),
         dealer_code: p.dealer_code,
@@ -3205,7 +3230,7 @@ exports.exportNexaDailyReport = async (req, res) => {
         agency: p.agency || '—',
         time_from: p.time_from,
         time_to: p.time_to,
-        slot_completed: p.slotCompleted ? 'Yes' : 'No', // Changed '' to 'No' based on your last request
+        slot_completed: p.slotCompleted ? 'Yes' : 'No',
         appeared_status: p.isAppeared ? 'Appeared' : 'Not Appeared',
         cert_status: p.certStatusStr
       });
@@ -3224,13 +3249,12 @@ exports.exportNexaDailyReport = async (req, res) => {
     // ==========================================
     // SEND RESPONSE (UPDATED FILENAME)
     // ==========================================
-    
+
     // 1. Get Level from the participants data
     const level = participants[0]?.level || 'L1';
 
-    // 2. Format Date (e.g., "16th Sep")
-    const dateObj = new Date(date + 'T00:00:00');
-    const day = dateObj.getDate();
+    // 2. Format Date (e.g., "19th Nov") from the YYYY-MM-DD param — no timezone drift
+    const [, monthNum, dayNum] = date.split('-').map(Number);
     const getSuffix = (d) => {
       if (d > 3 && d < 21) return 'th';
       switch (d % 10) {
@@ -3241,14 +3265,14 @@ exports.exportNexaDailyReport = async (req, res) => {
       }
     };
     const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    const formattedDate = `${day}${getSuffix(day)} ${monthNames[dateObj.getMonth()]}`;
+    const formattedDate = `${dayNum}${getSuffix(dayNum)} ${monthNames[monthNum - 1]}`;
 
-    // 3. Format API Hit Time (e.g., "1.50 PM")
+    // 3. Format API Hit Time (e.g., "1.50 PM") — local server time
     let hours = now.getHours();
     const minutes = String(now.getMinutes()).padStart(2, '0');
     const ampm = hours >= 12 ? 'PM' : 'AM';
     hours = hours % 12;
-    hours = hours ? hours : 12; 
+    hours = hours ? hours : 12;
     const formattedTime = `${hours}.${minutes} ${ampm}`;
 
     // 4. Construct Filename
@@ -3310,8 +3334,22 @@ exports.getNexaFilters = async (req, res) => {
 exports.exportNexaOverallAttendance = async (req, res) => {
   try {
     const today = new Date();
-    today.setHours(0, 0, 0, 0); // normalize to start of day
-    
+    // UTC date-only "today" for reliable date comparisons with DATE columns
+    const todayUTC = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
+
+    // Helper: convert any DATE value (JS Date from mysql2, or 'YYYY-MM-DD' string)
+    // into a UTC-midnight Date so ExcelJS serializes the correct calendar day.
+    const toExcelDateOnly = (val) => {
+      if (!val) return null;
+      if (val instanceof Date) {
+        return new Date(Date.UTC(val.getFullYear(), val.getMonth(), val.getDate()));
+      }
+      const s = String(val).slice(0, 10);
+      const [y, m, d] = s.split('-').map(Number);
+      if (!y || !m || !d) return null;
+      return new Date(Date.UTC(y, m - 1, d));
+    };
+
     // Fetch ALL Nexa data
     const [participants] = await pool.query(
       `SELECT 
@@ -3336,7 +3374,7 @@ exports.exportNexaOverallAttendance = async (req, res) => {
 
     const buildSheet = (sheetName, eligibleHeader, levelRows) => {
       const ws = wb.addWorksheet(sheetName);
-      
+
       ws.columns = [
         { header: 'S.NO.',            key: 'sno',           width: 8 },
         { header: 'Level',            key: 'level',         width: 8 },
@@ -3355,7 +3393,7 @@ exports.exportNexaOverallAttendance = async (req, res) => {
         { header: 'Time To',          key: 'time_to',       width: 12 },
         { header: 'Attendance',       key: 'attendance',    width: 18 }
       ];
-      
+
       const headerRow = ws.getRow(1);
       headerRow.height = 30;
       headerRow.eachCell(cell => {
@@ -3367,22 +3405,21 @@ exports.exportNexaOverallAttendance = async (req, res) => {
           bottom: { style: 'thin' }, right: { style: 'thin' }
         };
       });
-      
+
       levelRows.forEach((p, idx) => {
-        const participantDate = p.date ? new Date(p.date) : null;
-        if (participantDate) participantDate.setHours(0, 0, 0, 0);
-        
+        const participantDate = toExcelDateOnly(p.date);
+
         const appeared = ['Completed', 'In Progress'].includes(p.round_status);
-        
+
         let attendanceStatus;
         if (appeared) {
           attendanceStatus = 'Appeared';
-        } else if (participantDate && participantDate > today) {
+        } else if (participantDate && participantDate > todayUTC) {
           attendanceStatus = 'Pending';
         } else {
           attendanceStatus = 'Absent';
         }
-        
+
         const row = ws.addRow({
           sno:           idx + 1,
           level:         p.level,
@@ -3401,7 +3438,7 @@ exports.exportNexaOverallAttendance = async (req, res) => {
           time_to:       p.time_to,
           attendance:    attendanceStatus
         });
-        
+
         row.eachCell({ includeEmpty: true }, cell => {
           cell.alignment = { vertical: 'middle', horizontal: 'center' };
           cell.border = {
@@ -3409,18 +3446,18 @@ exports.exportNexaOverallAttendance = async (req, res) => {
             bottom: { style: 'thin' }, right: { style: 'thin' }
           };
         });
-        
+
         row.getCell('dealer_name').alignment   = { vertical: 'middle', horizontal: 'left' };
         row.getCell('name').alignment          = { vertical: 'middle', horizontal: 'left' };
         row.getCell('city').alignment          = { vertical: 'middle', horizontal: 'left' };
         row.getCell('faculty').alignment       = { vertical: 'middle', horizontal: 'left' };
         row.getCell('base_location').alignment = { vertical: 'middle', horizontal: 'left' };
-        
+
         if (row.getCell('date').value) {
           row.getCell('date').numFmt = 'dd-mmm-yy';
         }
       });
-      
+
       ws.views = [{ state: 'frozen', ySplit: 1 }];
       ws.autoFilter = { from: 'A1', to: `P${levelRows.length + 1}` };
     };
@@ -3438,7 +3475,6 @@ exports.exportNexaOverallAttendance = async (req, res) => {
       buildSheet('Nexa', 'Eligible', participants);
     }
 
-    const dateStr = today.toISOString().split('T')[0];
     const filename = `Nexa_Overall_Attendance.xlsx`;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
