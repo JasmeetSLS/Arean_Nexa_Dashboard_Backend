@@ -377,14 +377,9 @@ exports.getGridParticipant = async (req, res) => {
     const participantPage = parseInt(req.query.participantPage, 10) || 0;
     const limit           = parseInt(req.query.limit, 10) || 5;
 
-    const {
-      project, date, region, dealerName, dealerCode,
-      trainer, role, searchTrainer, searchParticipant
-    } = req.query;
+    const { project, date, region, dealerName, dealerCode, trainer, role, searchTrainer, searchParticipant } = req.query;
 
-    if (!project) {
-      return res.status(400).json({ success: false, error: 'Project is required' });
-    }
+    if (!project) return res.status(400).json({ success: false, error: 'Project is required' });
 
     const offset  = page * limit;
     const pOffset = participantPage * limit;
@@ -393,63 +388,45 @@ exports.getGridParticipant = async (req, res) => {
     let filterSql = '';
     const filterParams = [];
 
-    if (date)       { filterSql += ' AND DATE(p.date) = ?';        filterParams.push(date); }
-    if (region)     { filterSql += ' AND p.region = ?';            filterParams.push(region); }
-    if (dealerName) { filterSql += ' AND p.dealer_name = ?';       filterParams.push(dealerName); }
-    if (dealerCode) { filterSql += ' AND p.dealer_code = ?';       filterParams.push(dealerCode); }
-    if (role)       { filterSql += ' AND p.role = ?';              filterParams.push(role); }
-    if (trainer)    { filterSql += ' AND p.trainer_id = ?';        filterParams.push(trainer); }
+    if (date)       { filterSql += ' AND DATE(p.date) = ?'; filterParams.push(date); }
+    if (region)     { filterSql += ' AND p.region = ?'; filterParams.push(region); }
+    if (dealerName) { filterSql += ' AND p.dealer_name = ?'; filterParams.push(dealerName); }
+    if (dealerCode) { filterSql += ' AND p.dealer_code = ?'; filterParams.push(dealerCode); }
+    if (role)       { filterSql += ' AND p.role = ?'; filterParams.push(role); }
+    if (trainer)    { filterSql += ' AND p.trainer_id = ?'; filterParams.push(trainer); }
 
-    if (searchTrainer) {
-      filterSql += ' AND t.name LIKE ?';
-      filterParams.push(`%${searchTrainer}%`);
-    }
+    if (searchTrainer)     { filterSql += ' AND t.name LIKE ?'; filterParams.push(`%${searchTrainer}%`); }
     if (searchParticipant) {
       filterSql += ` AND (p.mpin LIKE ? OR p.name LIKE ?)`;
       filterParams.push(`%${searchParticipant}%`, `%${searchParticipant}%`);
     }
 
-    // --- ADMIN PERMISSION FILTERS ---
+    // --- ADMIN PERMISSIONS ---
     if (perms) {
-      if (!perms.projects.includes(project)) {
-        return res.json({ success: true, participants: [] });
-      }
-      if (perms.regions.length > 0) {
-        filterSql += ' AND p.region IN (?)';
-        filterParams.push(perms.regions);
-      } else {
-        filterSql += ' AND 1=0';
-      }
-      if (perms.roles.length > 0) {
-        filterSql += ' AND p.role IN (?)';
-        filterParams.push(perms.roles);
-      } else {
-        filterSql += ' AND 1=0';
-      }
+      if (!perms.projects.includes(project)) return res.json({ success: true, participants: [] });
+      if (perms.regions.length > 0) { filterSql += ' AND p.region IN (?)'; filterParams.push(perms.regions); } else { filterSql += ' AND 1=0'; }
+      if (perms.roles.length > 0)   { filterSql += ' AND p.role IN (?)';   filterParams.push(perms.roles);   } else { filterSql += ' AND 1=0'; }
     }
 
-    // --- 1. RESOLVE TRAINER IDS FOR THIS PAGE (attempted only, same as getGridTrainer) ---
+    // --- 1. Resolve the trainer IDs for this page (same source as getGridTrainer) ---
     const [trainerRows] = await pool.query(
       `SELECT t.id
          FROM trainers t
-         JOIN dashboard d    ON d.trainer_id = t.username AND d.project_name = ?
-         JOIN participants p ON p.mpin = d.mpin
+         JOIN participants p ON p.trainer_id = t.username AND p.project_name = ?
         WHERE t.status = 'active'
           ${filterSql}
         GROUP BY t.id
-        HAVING COUNT(DISTINCT d.mpin) > 0
+        HAVING COUNT(DISTINCT p.mpin) > 0
         ORDER BY t.id
         LIMIT ? OFFSET ?`,
       [project, ...filterParams, limit, offset]
     );
 
-    if (trainerRows.length === 0) {
-      return res.json({ success: true, participants: [] });
-    }
+    if (trainerRows.length === 0) return res.json({ success: true, participants: [] });
 
     const trainerIds = trainerRows.map(t => t.id);
 
-    // --- 2. FETCH PARTICIPANTS (only attempted — INNER JOIN dashboard) ---
+    // --- 2. Fetch participants filtered by t.id ---
     const [participants] = await pool.query(
       `SELECT * FROM (
           SELECT
@@ -466,11 +443,11 @@ exports.getGridParticipant = async (req, res) => {
              d.round_status AS \`roundsStatus\`,
              d.delay_status AS \`delayStatus\`,
              p.name, p.role,
-             t.id           AS \`trainerId\`,
+             t.id           AS \`trainerId\`,          -- ✅ numeric t.id directly
              ROW_NUMBER() OVER (PARTITION BY t.id ORDER BY p.mpin) AS rn
           FROM participants p
-          JOIN trainers t      ON t.username = p.trainer_id
-          JOIN dashboard d     ON d.mpin = p.mpin AND d.project_name = ?
+          JOIN trainers t     ON t.username = p.trainer_id
+          LEFT JOIN dashboard d ON d.mpin = p.mpin AND d.project_name = ?
          WHERE p.project_name = ?
            AND t.id IN (?)
            ${filterSql}
@@ -479,7 +456,7 @@ exports.getGridParticipant = async (req, res) => {
       [project, project, trainerIds, ...filterParams, pOffset, pOffset + limit]
     );
 
-    // --- 3. FETCH ROUNDS ---
+    // --- 3. Fetch rounds ---
     let rounds = [];
     if (participants.length > 0) {
       const mpins = participants.map(p => p.mpin);
@@ -504,7 +481,7 @@ exports.getGridParticipant = async (req, res) => {
       });
     }
 
-    // --- 4. SHAPE RESPONSE ---
+    // --- 4. Shape ---
     const shaped = participants.map(p => ({
       ...p,
       trainerId:       Number(p.trainerId) || null,
