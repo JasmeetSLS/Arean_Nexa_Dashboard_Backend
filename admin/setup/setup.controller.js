@@ -365,9 +365,6 @@ exports.getGridTrainer = async (req, res) => {
 // =====================================================================
 // GET /api/setup/grid-participant
 // =====================================================================
-// =====================================================================
-// GET /api/setup/grid-participant
-// =====================================================================
 exports.getGridParticipant = async (req, res) => {
   try {
     const { userId } = req.user || {};
@@ -384,7 +381,7 @@ exports.getGridParticipant = async (req, res) => {
     const offset  = page * limit;
     const pOffset = participantPage * limit;
 
-    // --- DYNAMIC FILTERS (participant side) ---
+    // --- DYNAMIC FILTERS (applied to participant-side where possible) ---
     let filterSql = '';
     const filterParams = [];
 
@@ -408,7 +405,7 @@ exports.getGridParticipant = async (req, res) => {
       if (perms.roles.length > 0)   { filterSql += ' AND p.role IN (?)';   filterParams.push(perms.roles);   } else { filterSql += ' AND 1=0'; }
     }
 
-    // --- 1. Resolve the trainer IDs for this page (same source as getGridTrainer) ---
+    // --- 1. Trainer IDs for this page (same source as getGridTrainer) ---
     const [trainerRows] = await pool.query(
       `SELECT t.id
          FROM trainers t
@@ -425,14 +422,21 @@ exports.getGridParticipant = async (req, res) => {
     if (trainerRows.length === 0) return res.json({ success: true, participants: [] });
 
     const trainerIds = trainerRows.map(t => t.id);
+    const usernameToIdMap = {};
+    // fetch usernames too so we can still report p.trainer_id → trainerId
+    const [usernameRows] = await pool.query(
+      `SELECT id, username FROM trainers WHERE id IN (?)`,
+      [trainerIds]
+    );
+    usernameRows.forEach(r => { usernameToIdMap[r.username] = r.id; });
 
-    // --- 2. Fetch participants filtered by t.id ---
+    // --- 2. Participants: FROM dashboard (only attempted), filter by t.id ---
     const [participants] = await pool.query(
       `SELECT * FROM (
           SELECT
-             p.mpin,
-             p.trainer_id,
-             p.project_name AS \`projectName\`,
+             d.mpin,
+             d.trainer_id,
+             d.project_name AS \`projectName\`,
              d.marks,
              d.max_marks    AS \`totalScore\`,
              d.completed    AS \`completedRounds\`,
@@ -443,20 +447,20 @@ exports.getGridParticipant = async (req, res) => {
              d.round_status AS \`roundsStatus\`,
              d.delay_status AS \`delayStatus\`,
              p.name, p.role,
-             t.id           AS \`trainerId\`,          -- ✅ numeric t.id directly
-             ROW_NUMBER() OVER (PARTITION BY t.id ORDER BY p.mpin) AS rn
-          FROM participants p
-          JOIN trainers t     ON t.username = p.trainer_id
-          LEFT JOIN dashboard d ON d.mpin = p.mpin AND d.project_name = ?
-         WHERE p.project_name = ?
+             t.id           AS \`trainerId\`,
+             ROW_NUMBER() OVER (PARTITION BY t.id ORDER BY d.mpin) AS rn
+          FROM dashboard d
+          JOIN participants p ON p.mpin = d.mpin
+          JOIN trainers t     ON t.username = d.trainer_id
+         WHERE d.project_name = ?
            AND t.id IN (?)
            ${filterSql}
        ) AS x
        WHERE rn > ? AND rn <= ?`,
-      [project, project, trainerIds, ...filterParams, pOffset, pOffset + limit]
+      [project, trainerIds, ...filterParams, pOffset, pOffset + limit]
     );
 
-    // --- 3. Fetch rounds ---
+    // --- 3. Rounds ---
     let rounds = [];
     if (participants.length > 0) {
       const mpins = participants.map(p => p.mpin);
