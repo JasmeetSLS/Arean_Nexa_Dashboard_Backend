@@ -419,36 +419,46 @@ exports.getGridParticipant = async (req, res) => {
     if (trainerRows.length === 0) return res.json({ success: true, participants: [] });
 
     const trainerIds = trainerRows.map(t => t.id);
-
-    // --- 2. Fetch participants filtered by t.id ---
-    const [participants] = await pool.query(
-      `SELECT * FROM (
-          SELECT
-             p.mpin,
-             p.trainer_id,
-             p.project_name AS \`projectName\`,
-             d.marks,
-             d.max_marks    AS \`totalScore\`,
-             d.completed    AS \`completedRounds\`,
-             d.required     AS \`totalRounds\`,
-             d.percentage,
-             d.total_time   AS \`totalTime\`,
-             d.status,
-             d.round_status AS \`roundsStatus\`,
-             d.delay_status AS \`delayStatus\`,
-             p.name, p.role,
-             t.id           AS \`trainerId\`,          -- ✅ numeric t.id directly
-             ROW_NUMBER() OVER (PARTITION BY t.id ORDER BY p.mpin) AS rn
-          FROM participants p
-          JOIN trainers t     ON t.username = p.trainer_id
-          LEFT JOIN dashboard d ON d.mpin = p.mpin AND d.project_name = ?
-         WHERE p.project_name = ?
-           AND t.id IN (?)
-           ${filterSql}
-       ) AS x
-       WHERE rn > ? AND rn <= ?`,
-      [project, project, trainerIds, ...filterParams, pOffset, pOffset + limit]
+    
+    // --- 2. Fetch ALL attempted participants for these trainers (No SQL pagination) ---
+    const [rows] = await pool.query(
+      `SELECT
+          d.mpin,
+          d.trainer_id,
+          d.project_name AS \`projectName\`,
+          d.marks,
+          d.max_marks    AS \`totalScore\`,
+          d.completed    AS \`completedRounds\`,
+          d.required     AS \`totalRounds\`,
+          d.percentage,
+          d.total_time   AS \`totalTime\`,
+          d.status,
+          d.round_status AS \`roundsStatus\`,
+          d.delay_status AS \`delayStatus\`,
+          p.name, p.role,
+          t.id           AS \`trainerId\`
+       FROM dashboard d
+       JOIN participants p ON p.mpin = d.mpin
+       JOIN trainers t     ON t.username = d.trainer_id
+      WHERE d.project_name = ?
+        AND t.id IN (?)
+        ${filterSql}
+      ORDER BY t.id, d.mpin`,
+      [project, trainerIds, ...filterParams]
     );
+
+    // --- 2b. Slice PER TRAINER by participantPage ---
+    const byTrainer = {};
+    for (const r of rows) {
+      (byTrainer[r.trainerId] ||= []).push(r);
+    }
+
+    const participants = [];
+    for (const tid of trainerIds) {
+      const list = byTrainer[tid] || [];
+      // ✅ Slices exactly 5 rows per trainer independently
+      participants.push(...list.slice(pOffset, pOffset + limit));
+    }
 
     // --- 3. Fetch rounds ---
     let rounds = [];
